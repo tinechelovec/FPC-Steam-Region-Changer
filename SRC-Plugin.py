@@ -29,12 +29,26 @@ except ImportError:
             return ""
     Fore = _DummyColor()
     Style = _DummyColor()
-
 logger = logging.getLogger("FPC.SteamRegionChanger")
 LP = "[Steam Region Changer]"
 
+BASE_DIR = os.getcwd()
+STORAGE_DIR = os.path.join(BASE_DIR, "storage", "plugins", "src_plugin")
+PLUGIN_LOG_DIR = STORAGE_DIR
+PLUGIN_LOG_FILE = os.path.join(PLUGIN_LOG_DIR, "src_plugin.log")
+try:
+    os.makedirs(PLUGIN_LOG_DIR, exist_ok=True)
+    _fh = logging.FileHandler(PLUGIN_LOG_FILE, encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s"))
+    logger.addHandler(_fh)
+except Exception:
+    pass
+def _mask_gift_code(c: str) -> str:
+    s = (c or "").strip()
+    if len(s) <= 6:
+        return "***"
+    return f"{s[:4]}-****-{s[-4:]}"
 def _mask_proxy(p: str) -> str:
-
     s = str(p or "")
     s = re.sub(r':([^@:]+)@', ':***@', s)
     parts = s.split(":")
@@ -44,7 +58,6 @@ def _mask_proxy(p: str) -> str:
         elif parts[3].isdigit():
             return f"{parts[0]}:***:{parts[2]}:{parts[3]}"
     return s
-
 def _log_event(event: str, level: int = logging.INFO, **fields: Any) -> None:
     tag = f"{Fore.CYAN}{LP}{Style.RESET_ALL}"
     ev_str = f"{Fore.YELLOW}event={event}{Style.RESET_ALL}"
@@ -57,7 +70,6 @@ def _log_event(event: str, level: int = logging.INFO, **fields: Any) -> None:
             v_str = '***'
         elif k in ('proxy', 'proxy_url'):
             v_str = _mask_proxy(v_str)
-
         if k in ('status', 'result'):
             if str(v).lower() in ('ok', 'success', 'alive', '200', 'fixed'):
                 val_colored = f"{Fore.GREEN}{v_str}{Style.RESET_ALL}"
@@ -70,9 +82,7 @@ def _log_event(event: str, level: int = logging.INFO, **fields: Any) -> None:
         else:
             val_colored = f"{Fore.WHITE}{v_str}{Style.RESET_ALL}"
         parts.append(f"{Fore.LIGHTBLUE_EX}{k}={Style.RESET_ALL}{val_colored}")
-
     logger.log(level, " ".join(parts))
-
 try:
     from tg_bot import CBT as _CBT
 except Exception:
@@ -81,9 +91,8 @@ try:
     from telebot import types as tg_types
 except Exception:
     tg_types = None
-
 NAME = "Steam Region Changer"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 DESCRIPTION = "Смена региона Steam (Steam Region Changer)"
 CREDITS = "@tinechelovec"
 UUID = "001ab503-775a-41c2-8b96-4207daaf33a7"
@@ -122,15 +131,6 @@ URL_REDEEM_GIFT = "https://store.steampowered.com/account/ajaxredeemwalletcode/"
 URL_ACCOUNT_HISTORY = "https://store.steampowered.com/account/history/"
 URL_ACCOUNT = "https://store.steampowered.com/account/"
 
-WALLET_FIXED_RE = re.compile(
-    r'id="header_wallet_balance"'
-    r'|"wallet_currency"\s*:\s*[1-9]'
-    r'|"has_wallet"\s*:\s*true'
-    r'|class="[^"]*wallet_header[^"]*"'
-    r'|wallet_balance_currency',
-    re.IGNORECASE,
-)
-
 RATE_LIMIT_DELAY = 30
 
 MAX_PROXY_ATTEMPTS_FLOOR = 10
@@ -140,7 +140,6 @@ GIFT_MAX_PROXY_ATTEMPTS = 3
 _RETRYABLE_HTTP = {503, 502, 504, 429, 520, 521, 522, 523, 524}
 
 def format_eta(seconds: float) -> str:
-
     s = max(0, int(round(seconds)))
     if s < 60:
         return f"{s} сек"
@@ -149,9 +148,7 @@ def format_eta(seconds: float) -> str:
         return f"{m} мин" + (f" {sec} сек" if sec else "")
     h, m = divmod(m, 60)
     return f"{h} ч" + (f" {m} мин" if m else "")
-
 def _is_network_error(exc: BaseException) -> bool:
-
     if isinstance(exc, (
         asyncio.TimeoutError,
         aiohttp.ServerConnectionError,
@@ -169,9 +166,7 @@ def _is_network_error(exc: BaseException) -> bool:
         "proxy", "tunnel", "connection", "timeout",
         "reset by peer", "broken pipe", "eof",
     ))
-
 async def _net(coro_fn, *args, label: str = "", **kwargs):
-
     result = await coro_fn(*args, **kwargs)
     if hasattr(result, "status") and result.status in _RETRYABLE_HTTP:
         raise aiohttp.ClientResponseError(
@@ -181,7 +176,6 @@ async def _net(coro_fn, *args, label: str = "", **kwargs):
             message=f"HTTP {result.status}",
         )
     return result
-
 COUNTRY_NAMES: dict[str, str] = {
     "RU": "🇷🇺 Россия",
     "KZ": "🇰🇿 Казахстан",
@@ -235,7 +229,6 @@ class RegionResult:
     FAIL_CHANGE = "FAIL_CHANGE"
     ERROR = "ERROR"
     SKIPPED = "SKIPPED"
-
 @dataclass
 class AccountRegionResult:
     login: str
@@ -243,69 +236,54 @@ class AccountRegionResult:
     new_region: str | None = None
     error: str | None = None
     gift_results: list[tuple[str, bool, str]] = field(default_factory=list)
-
     @property
     def success(self) -> bool:
-        return self.status in (RegionResult.OK, RegionResult.ALREADY)
-
+        return self.status in (RegionResult.OK, RegionResult.ALREADY, RegionResult.SENT)
     @property
     def is_success(self) -> bool:
         return self.success
-
     @property
     def gift_redeemed(self) -> bool:
         return any(ok for _, ok, _ in self.gift_results)
-
     @property
     def skipped(self) -> bool:
         return self.status == RegionResult.SKIP_FIXED
-
     @property
     def critical_wrong_region(self) -> bool:
         return self.status == RegionResult.FAIL_WRONG_REGION
-
 @dataclass
 class BatchRegionResult:
     country_code: str
     total: int
     results: list[AccountRegionResult] = field(default_factory=list)
-
     @property
     def ok(self) -> list[AccountRegionResult]:
         return [r for r in self.results if r.success]
-
     @property
     def skipped(self) -> list[AccountRegionResult]:
         return [r for r in self.results if r.skipped]
-
     @property
     def wrong_region(self) -> list[AccountRegionResult]:
         return [r for r in self.results if r.critical_wrong_region]
-
     @property
     def failed(self) -> list[AccountRegionResult]:
         return [r for r in self.results
                 if not r.success and not r.skipped and not r.critical_wrong_region
                 and r.status not in (RegionResult.SKIPPED, RegionResult.SENT)]
-
     @property
     def sent(self) -> list[AccountRegionResult]:
         return [r for r in self.results if r.status == RegionResult.SENT]
-
     @property
     def user_skipped(self) -> list[AccountRegionResult]:
         return [r for r in self.results if r.status == RegionResult.SKIPPED]
-
     @property
     def gift_ok(self) -> list[tuple[str, str]]:
         return [(r.login, code) for r in self.results
                 for (code, ok, _msg) in r.gift_results if ok]
-
     @property
     def gift_failed(self) -> list[tuple[str, str, str]]:
         return [(r.login, code, msg) for r in self.results
                 for (code, ok, msg) in r.gift_results if not ok]
-
 def _is_ip_or_host(s: str) -> bool:
     s = str(s or "").strip()
     if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', s):
@@ -313,32 +291,26 @@ def _is_ip_or_host(s: str) -> bool:
     if '.' in s and re.match(r'^[a-zA-Z0-9_\-\.]+$', s):
         return True
     return False
-
 def normalize_proxy_url(p: str) -> str:
     p = (p or "").strip().strip("'\"` \t\r\n")
     if not p:
         return ""
-
     scheme = "http"
     if "://" in p:
         scheme, rest = p.split("://", 1)
         scheme = scheme.lower()
     else:
         rest = p
-
     rest = rest.rstrip("/").strip()
-
     if "@" in rest:
         left, right = rest.split("@", 1)
         left_parts = left.split(":")
         right_parts = right.split(":")
         left_has_port = len(left_parts) == 2 and left_parts[1].isdigit()
         right_has_port = len(right_parts) == 2 and right_parts[1].isdigit()
-
         if left_has_port and not right_has_port:
             return f"{scheme}://{right}@{left}"
         return f"{scheme}://{rest}"
-
     parts = rest.split(":")
     if len(parts) == 4:
         p0, p1, p2, p3 = parts
@@ -355,29 +327,29 @@ def normalize_proxy_url(p: str) -> str:
     elif len(parts) == 2:
         return f"{scheme}://{parts[0]}:{parts[1]}"
     return f"{scheme}://{rest}"
-
 class ProxyRequestStrategy:
-
     def __init__(self, proxy: str | None = None):
         self._proxy = normalize_proxy_url(proxy) if proxy else None
         self._session: ClientSession | None = None
-
     def _get_session(self) -> ClientSession:
         if self._session is None or self._session.closed:
+            cfg_to = REGION_REQUEST_TIMEOUT
+            try:
+                cfg_to = float(_load_config().get("request_timeout", REGION_REQUEST_TIMEOUT))
+            except Exception:
+                pass
             self._session = ClientSession(
                 connector=aiohttp.TCPConnector(ssl=False),
                 timeout=aiohttp.ClientTimeout(
-                    total=REGION_REQUEST_TIMEOUT,
+                    total=cfg_to,
                     connect=REGION_CONNECT_TIMEOUT,
                     sock_connect=REGION_CONNECT_TIMEOUT,
                 ),
             )
         return self._session
-
     async def close(self):
         if self._session and not self._session.closed:
             await self._session.close()
-
     async def request(self, url: str, method: str = "GET", **kwargs: Any) -> ClientResponse:
         session = self._get_session()
         if self._proxy and "proxy" not in kwargs:
@@ -393,7 +365,6 @@ class ProxyRequestStrategy:
         logger.debug(f"[{NAME}] [HTTP {method}] {url} через {_mask_proxy(self._proxy or 'прямое соединение')}")
         response = await session.request(method, url, **kwargs)
         return response
-
     def cookies(self, domain: str = "steamcommunity.com") -> Mapping[str, str]:
         session = self._get_session()
         result = {}
@@ -401,19 +372,16 @@ class ProxyRequestStrategy:
             if cookie["domain"] == domain:
                 result[cookie.key] = cookie.value
         return result
-
     async def text(self, url: str, method: str = "GET", **kwargs: Any) -> str:
         resp = await self.request(url, method, **kwargs)
         return await resp.text()
-
     async def bytes(self, url: str, method: str = "GET", **kwargs: Any) -> bytes:
         resp = await self.request(url, method, **kwargs)
         return await resp.read()
-
 def parse_store_page(html: str) -> dict:
     country_code = None
     wallet_currency = None
-    wallet_fixed = bool(WALLET_FIXED_RE.search(html))
+    wallet_fixed = False
     m = re.search(r'data-userinfo="([^"]+)"', html)
     if m:
         try:
@@ -421,6 +389,9 @@ def parse_store_page(html: str) -> dict:
             data = json.loads(raw)
             country_code = data.get("country_code")
             wallet_currency = data.get("wallet_currency")
+            bal = data.get("wallet_balance", 0)
+            if bal and int(bal) > 0:
+                wallet_fixed = True
         except Exception:
             pass
     return {
@@ -428,9 +399,7 @@ def parse_store_page(html: str) -> dict:
         "wallet_fixed": wallet_fixed,
         "wallet_currency": wallet_currency,
     }
-
 def get_shared_secret_from_mafile(mafile_path: str | None) -> str | None:
-
     if not mafile_path:
         return None
     try:
@@ -439,9 +408,7 @@ def get_shared_secret_from_mafile(mafile_path: str | None) -> str | None:
         return data.get("shared_secret") or None
     except Exception:
         return None
-
 def find_shared_secret_in_dir(login: str, mafiles_dir: str) -> str | None:
-
     p = Path(mafiles_dir)
     if not p.is_dir():
         return None
@@ -459,24 +426,21 @@ def find_shared_secret_in_dir(login: str, mafiles_dir: str) -> str | None:
            (acc_name and (login_lower.startswith(acc_name) or acc_name.startswith(login_lower))):
             return data.get("shared_secret") or None
     return None
-
 async def _try_import_pysteamauth():
     try:
         from pysteamauth.auth import Steam
         return Steam
     except ImportError:
         return None
-
 class GuardCodeSkipped(Exception):
     pass
-
 class GuardCodeRejected(Exception):
     pass
-
+class SteamLoginFailed(Exception):
+    pass
 _ManualSteamClass = None
 
 async def _try_import_manual_steam():
-
     global _ManualSteamClass
     if _ManualSteamClass is not None:
         return _ManualSteamClass
@@ -486,19 +450,14 @@ async def _try_import_manual_steam():
         from urllib3.util import parse_url
     except ImportError:
         return None
-
     class ManualGuardSteam(Steam):
         _manual_code: str = ""
         _guard_provider: GuardProvider | None = None
-
         def set_guard_code(self, code: str) -> None:
             self._manual_code = (code or "").strip().upper()
-
         def set_guard_provider(self, provider: GuardProvider | None) -> None:
             self._guard_provider = provider
-
         async def login_to_steam(self) -> None:
-
             if await self.is_authorized():
                 return
             if not self._requests.cookies().get("sessionid"):
@@ -509,28 +468,52 @@ async def _try_import_manual_steam():
                 encrypted_password=encrypted_password,
                 rsa_timestamp=keys.timestamp,
             )
+            twofactor_requested = False
             if auth_session.allowed_confirmations:
-                if self._is_twofactor_required(auth_session.allowed_confirmations[0]):
-
+                twofactor_conf = None
+                for conf in auth_session.allowed_confirmations:
+                    c_type = getattr(conf, "confirmation_type", None)
+                    if c_type in (
+                        EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceCode,
+                        EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode,
+                    ):
+                        twofactor_conf = conf
+                        break
+                if twofactor_conf:
+                    twofactor_requested = True
                     if self._guard_provider is not None:
                         code = (await self._guard_provider(self._login) or "").strip().upper()
                     else:
                         code = self._manual_code
                     if not code:
                         raise GuardCodeSkipped()
+                    c_type = getattr(twofactor_conf, "confirmation_type", None)
+                    code_type = EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceCode
+                    if c_type == EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode:
+                        code_type = EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode
                     await self._update_auth_session(
                         client_id=auth_session.client_id,
                         steamid=auth_session.steamid,
                         code=code,
-                        code_type=EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceCode,
+                        code_type=code_type,
                     )
             session = await self._poll_auth_session_status(
                 client_id=auth_session.client_id,
                 request_id=auth_session.request_id,
             )
             if not session.refresh_token:
-
-                raise GuardCodeRejected("Guard-код не принят Steam (неверный или просроченный)")
+                if twofactor_requested:
+                    raise GuardCodeRejected("Guard-код не принят Steam (неверный или просроченный код)")
+                elif auth_session.allowed_confirmations:
+                    has_mobile_push = any(
+                        getattr(c, "confirmation_type", None) == EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceConfirmation
+                        for c in auth_session.allowed_confirmations
+                    )
+                    if has_mobile_push:
+                        raise SteamLoginFailed("Требуется подтвердить вход в мобильном приложении Steam (Steam Guard Push)")
+                    c_names = [str(getattr(c, "confirmation_type", c)) for c in auth_session.allowed_confirmations]
+                    raise SteamLoginFailed(f"Требуется подтверждение Steam: {', '.join(c_names)}")
+                raise SteamLoginFailed("Не удалось получить сессию Steam (неверный логин или пароль)")
             tokens = await self._finalize_login(
                 refresh_token=session.refresh_token,
                 sessionid=self._requests.cookies()["sessionid"],
@@ -549,17 +532,13 @@ async def _try_import_manual_steam():
                 await self._requests.bytes(url, "GET")
                 cookies.update({parse_url(url).host: self._requests.cookies(parse_url(url).host)})
             await self._storage.set(login=self._login, cookies=cookies)
-
     _ManualSteamClass = ManualGuardSteam
     return _ManualSteamClass
-
 class QRLoginTimeout(Exception):
     pass
-
 _QRSteamClass = None
 
 async def _try_import_qr_steam():
-
     global _QRSteamClass
     if _QRSteamClass is not None:
         return _QRSteamClass
@@ -574,10 +553,8 @@ async def _try_import_qr_steam():
         from urllib3.util import parse_url
     except ImportError:
         return None
-
     class QRSteam(Steam):
         account_name: str = ""
-
         async def _begin_qr(self):
             message = CAuthentication_BeginAuthSessionViaQR_Request(
                 device_friendly_name="Mozilla/5.0 (X11; Linux x86_64; rv:1.9.5.20) "
@@ -592,7 +569,6 @@ async def _try_import_qr_steam():
                 ]),
             )
             return CAuthentication_BeginAuthSessionViaQR_Response.FromString(response)
-
         async def login_via_qr(self, display_cb: QRDisplay, poll_timeout: float = 180.0) -> str:
             if not self._requests.cookies().get("sessionid"):
                 await self._requests.bytes(method="GET", url="https://steamcommunity.com")
@@ -602,7 +578,6 @@ async def _try_import_qr_steam():
             interval = qr.interval or 2.0
             last_url = qr.challenge_url
             await display_cb(last_url)
-
             deadline = time.monotonic() + poll_timeout
             refresh_token = None
             while time.monotonic() < deadline:
@@ -613,7 +588,6 @@ async def _try_import_qr_steam():
                 if session.new_client_id:
                     client_id = session.new_client_id
                 if session.new_challenge_url and session.new_challenge_url != last_url:
-
                     last_url = session.new_challenge_url
                     await display_cb(last_url)
                 if session.refresh_token:
@@ -623,7 +597,6 @@ async def _try_import_qr_steam():
                     break
             if not refresh_token:
                 raise QRLoginTimeout("QR-код не подтверждён (истекло время ожидания)")
-
             tokens = await self._finalize_login(
                 refresh_token=refresh_token,
                 sessionid=self._requests.cookies()["sessionid"],
@@ -644,12 +617,9 @@ async def _try_import_qr_steam():
                 cookies.update({parse_url(url).host: self._requests.cookies(parse_url(url).host)})
             await self._storage.set(login=self._login, cookies=cookies)
             return self.account_name
-
     _QRSteamClass = QRSteam
     return _QRSteamClass
-
 async def set_country_raw(strategy: ProxyRequestStrategy, cc: str, session_id: str) -> bool:
-
     hdrs = {"X-Requested-With": "XMLHttpRequest"}
     ok_store = ok_chk = False
     try:
@@ -662,7 +632,6 @@ async def set_country_raw(strategy: ProxyRequestStrategy, cc: str, session_id: s
         ok_store = True
     except Exception as e:
         logger.debug(f"set_country store error: {e}")
-
     try:
         await strategy.request(
             URL_SET_COUNTRY_CHK, method="POST",
@@ -673,9 +642,7 @@ async def set_country_raw(strategy: ProxyRequestStrategy, cc: str, session_id: s
         ok_chk = True
     except Exception as e:
         logger.debug(f"set_country checkout error: {e}")
-
     return ok_store or ok_chk
-
 _REDEEM_DETAIL = {
     0: "NoDetail",
     2: "InsufficientFunds",
@@ -696,9 +663,7 @@ def _decode_redeem_body(body: str) -> str:
     except Exception:
         pass
     return body
-
 async def trigger_wallet_raw(strategy: ProxyRequestStrategy, session_id: str) -> str:
-
     fake = "".join(random.choices("ABCDEFGHJKMNPQRTVWXY23456789", k=15))
     fake = f"{fake[:5]}-{fake[5:10]}-{fake[10:15]}"
     try:
@@ -717,32 +682,25 @@ async def trigger_wallet_raw(strategy: ProxyRequestStrategy, session_id: str) ->
             return f"<HTTP {getattr(resp, 'status', '?')}, тело не прочитано>"
     except Exception as e:
         return f"<ошибка запроса: {str(e)[:120]}>"
-
 async def check_proxy(proxy_url: str, timeout: float = 8.0) -> tuple[bool, str]:
-
     clean_p = _mask_proxy(proxy_url)
     p_url = normalize_proxy_url(proxy_url)
     if not p_url:
         _log_event("proxy_check", level=logging.WARNING, status="fail", proxy=clean_p, err="invalid_url")
         return False, "пустой/неверный URL"
-
     t0 = time.monotonic()
     country_code = "??"
     geo_ok = False
     geo_err = ""
-
     geo_endpoints = [
         ("http://ip-api.com/json/", "countryCode"),
         ("https://ipwho.is/", "country_code"),
         ("https://api.myip.com", "cc"),
     ]
-
     connector = aiohttp.TCPConnector(ssl=False)
     client_timeout = aiohttp.ClientTimeout(total=timeout, connect=max(3.0, timeout / 2))
-
     try:
         async with aiohttp.ClientSession(connector=connector, timeout=client_timeout) as session:
-
             for geo_url, key in geo_endpoints:
                 try:
                     async with session.get(geo_url, proxy=p_url) as resp:
@@ -760,7 +718,6 @@ async def check_proxy(proxy_url: str, timeout: float = 8.0) -> tuple[bool, str]:
                     geo_err = "таймаут"
                 except Exception as e:
                     geo_err = str(e)[:60]
-
             try:
                 async with session.get(
                     "https://store.steampowered.com/",
@@ -793,18 +750,17 @@ async def check_proxy(proxy_url: str, timeout: float = 8.0) -> tuple[bool, str]:
         err_msg = _mask_proxy(str(e))[:80]
         _log_event("proxy_check", level=logging.WARNING, status="fail", proxy=clean_p, err=err_msg, ms=int(elapsed * 1000))
         return False, err_msg
-
 async def check_proxies_for_country(
     proxies: list[str],
     expected_cc: str,
-    max_check: int = 5,
+    max_check: int = 10,
 ) -> tuple[list[str], list[str]]:
-
-    _log_event("country_check_start", country=expected_cc, count=min(len(proxies), max_check), total=len(proxies))
+    check_list = proxies[:max_check] if max_check > 0 else proxies
+    _log_event("country_check_start", country=expected_cc, count=len(check_list), total=len(proxies))
     good, bad = [], []
-    tasks = [check_proxy(p) for p in proxies[:max_check]]
+    tasks = [check_proxy(p) for p in check_list]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    for proxy, result in zip(proxies[:max_check], results):
+    for proxy, result in zip(check_list, results):
         clean_p = _mask_proxy(proxy)
         if isinstance(result, tuple) and result[0]:
             cc = result[1]
@@ -818,78 +774,71 @@ async def check_proxies_for_country(
             bad.append(proxy)
             err_str = result[1] if isinstance(result, tuple) else str(result)[:60]
             _log_event("country_proxy_result", level=logging.WARNING, status="fail", proxy=clean_p, reason=err_str)
-    good.extend(proxies[max_check:])
     _log_event("country_check_summary", country=expected_cc, good=len(good), bad=len(bad))
     return good, bad
-
+def _parse_steam_balance(text: str) -> float:
+    if not text:
+        return 0.0
+    cleaned = re.sub(r'[^\d,.]', '', str(text)).replace(',', '.')
+    try:
+        return float(cleaned)
+    except Exception:
+        return 0.0
 async def check_account_steam_funding(steam, login: str = "") -> tuple[bool, str]:
-
     cfg = _load_config()
     if not cfg.get("check_steam_funding", True):
         return False, ""
-
+    net_errors: list[str] = []
     try:
         html_funds = await _net(steam.request, URL_ADDFUNDS, label=login)
         parsed = parse_store_page(html_funds)
         if parsed.get("wallet_fixed"):
             return True, "кошелёк Steam уже зафиксирован на странице addfunds (были пополнения)"
-        if parsed.get("wallet_currency") and int(parsed.get("wallet_currency") or 0) > 0:
-            return True, f"установлена валюта кошелька Steam (currency #{parsed.get('wallet_currency')})"
     except Exception as e:
         logger.warning(f"[{login}] Ошибка проверки addfunds: {e}")
-
+        net_errors.append(f"addfunds: {e}")
     try:
         html_history = await _net(steam.request, URL_ACCOUNT_HISTORY, label=login)
-
         has_tx = bool(
             re.search(r'HelpWithTransaction\?transid=\d+', html_history, re.IGNORECASE)
-            or re.search(r'class="[^"]*wallet_history_click[^"]*"', html_history, re.IGNORECASE)
-            or re.search(r'<td[^>]*class="[^"]*wht_date[^"]*"[^>]*>\s*\d+', html_history, re.IGNORECASE)
-            or re.search(r'<td[^>]*class="[^"]*wht_total[^"]*"[^>]*>\s*[^\s<]+', html_history, re.IGNORECASE)
-            or re.search(r'<tr[^>]*class="[^"]*transactionRow[^"]*"[^>]*>\s*<td', html_history, re.IGNORECASE)
+            or re.search(r'<tr[^>]*class="[^"]*(?:transactionRow|wallet_table_row)[^"]*"[^>]*>\s*<td', html_history, re.IGNORECASE)
         )
         if has_tx:
             return True, "обнаружена история покупок или пополнений в Steam (account/history)"
     except Exception as e:
         logger.warning(f"[{login}] Ошибка проверки истории транзакций: {e}")
-
+        net_errors.append(f"history: {e}")
     try:
         html_acc = await _net(steam.request, URL_ACCOUNT, label=login)
-        if WALLET_FIXED_RE.search(html_acc):
-            return True, "обнаружен привязанный баланс/кошелёк на странице аккаунта"
         m_bal = re.search(r'accountData\s+price[^>]*>([^<]+)<', html_acc, re.IGNORECASE)
         if m_bal:
             bal_text = m_bal.group(1).strip()
-            digits = re.findall(r'\d+', bal_text)
-            if digits and any(int(d) > 0 for d in digits):
+            if _parse_steam_balance(bal_text) > 0.0:
                 return True, f"обнаружен ненулевой баланс Steam ({bal_text})"
     except Exception as e:
         logger.warning(f"[{login}] Ошибка проверки баланса на странице аккаунта: {e}")
-
+        net_errors.append(f"account: {e}")
+    if len(net_errors) >= 3:
+        logger.warning(f"[{login}] Не удалось надёжно проверить историю пополнений из-за сетевых ошибок: {net_errors}")
+        return False, ""
     return False, ""
-
 class ProxyPool:
-
     def __init__(self, proxies: list[str]):
         self._initial = [p for p in (proxies or []) if p]
         self._proxies = list(self._initial)
         self._failures: dict[str, int] = {}
         self._idx = 0
-
     def __len__(self) -> int:
         return len(self._proxies)
-
     @property
     def total_configured(self) -> int:
         return len(self._initial)
-
     def get_next(self) -> str | None:
         if not self._proxies:
             return None
         p = self._proxies[self._idx % len(self._proxies)]
         self._idx += 1
         return p
-
     def ban(self, proxy: str | None) -> None:
         if not proxy:
             return
@@ -902,30 +851,23 @@ class ProxyPool:
                     logger.warning(f"Прокси временно исключён из пула ({self._failures[proxy]} ошибок): {_mask_proxy(proxy)}")
             except ValueError:
                 pass
-
 class GiftCodePool:
-
     def __init__(self, codes: list[str], per_account: int = 1):
         self._codes = [c for c in (codes or []) if c]
         self._per = max(1, per_account)
         self._idx = 0
-
     def __len__(self) -> int:
         return max(0, len(self._codes) - self._idx)
-
     @property
     def codes(self) -> list[str]:
         return self._codes[self._idx:]
-
     def take(self) -> list[str]:
         if self._idx >= len(self._codes):
             return []
         batch = self._codes[self._idx:self._idx + self._per]
         self._idx += self._per
         return batch
-
 async def _poll_store_page(steam, login: str, ready) -> dict | None:
-
     page = None
     for _ in range(max(1, REGION_WAIT_TRIES)):
         await asyncio.sleep(REGION_WAIT_INTERVAL)
@@ -938,13 +880,11 @@ async def _poll_store_page(steam, login: str, ready) -> dict | None:
         if ready(page):
             return page
     return page
-
 async def _finish_with_gifts(
     login: str, new_region: str | None, strategy, session_id, proxy_pool: "ProxyPool",
     gift_pool: "GiftCodePool | None", password: str, shared_secret: str | None,
     guard_provider: GuardProvider | None,
 ) -> AccountRegionResult:
-
     gift_results: list[tuple[str, bool, str]] = []
     if gift_pool is not None:
         codes = gift_pool.take()
@@ -956,11 +896,9 @@ async def _finish_with_gifts(
                 guard_provider=guard_provider,
             )
     return AccountRegionResult(login, RegionResult.OK, new_region=new_region, gift_results=gift_results)
-
 async def _region_change_core(
     steam, strategy, session_id, login: str, country_code: str,
 ) -> AccountRegionResult | None:
-
     has_funding, fund_reason = await check_account_steam_funding(steam, login=login)
     if has_funding:
         logger.warning(f"[{login}] Защита от пополнений: {fund_reason}")
@@ -968,27 +906,26 @@ async def _region_change_core(
             login, RegionResult.SKIP_FIXED,
             error=f"На аккаунте обнаружены предыдущие пополнения/покупки Steam ({fund_reason}). Смена региона невозможна.",
         )
-
     try:
         html = await _net(steam.request, URL_ADDFUNDS, label=login)
         page_before = parse_store_page(html)
     except Exception as e:
         logger.warning(f"[{login}] страница до смены недоступна: {e}")
         page_before = {"country_code": None, "wallet_fixed": False}
-
     current = page_before["country_code"]
     fixed = page_before["wallet_fixed"]
-    if fixed:
+    if current and current.upper() == country_code.upper():
+        if fixed:
+            logger.info(f"[{login}] Регион уже {country_code} в профиле и закреплён")
+            return AccountRegionResult(login, RegionResult.OK, new_region=current)
+    elif fixed:
         return AccountRegionResult(
             login, RegionResult.SKIP_FIXED, new_region=current,
-            error="Кошелёк аккаунта уже зафиксирован (были пополнения баланса).",
+            error=f"Кошелёк аккаунта уже зафиксирован на регионе {current or 'другом'} (были пополнения). Смена региона невозможна.",
         )
-
     already_target = bool(current and current.upper() == country_code.upper())
-
     def _target_ready(p: dict) -> bool:
         return bool(p["country_code"] and p["country_code"].upper() == country_code.upper())
-
     if already_target:
         logger.info(f"[{login}] регион уже {country_code} в профиле, но не закреплён — закрепляем")
         page_mid = page_before
@@ -998,11 +935,9 @@ async def _region_change_core(
         if page_mid is None:
             logger.warning(f"[{login}] страница перед закреплением недоступна — повтор")
             return None
-
     mid_region = page_mid["country_code"]
     mid_fixed = page_mid["wallet_fixed"]
     mid_ok = bool(mid_region and mid_region.upper() == country_code.upper())
-
     if mid_fixed:
         if mid_ok:
             return AccountRegionResult(login, RegionResult.OK, new_region=mid_region)
@@ -1010,41 +945,35 @@ async def _region_change_core(
             login, RegionResult.FAIL_WRONG_REGION, new_region=mid_region,
             error=f"Ожидался {country_code}, зафиксирован {mid_region}",
         )
-
     if not mid_ok:
         logger.warning(
             f"[{login}] страна не подтверждена перед закреплением "
             f"(текущая: {mid_region!r}, нужна: {country_code}) — повтор без фиксации"
         )
         return None
-
     wallet_resp = await _net(trigger_wallet_raw, strategy, session_id, label=login)
-    logger.debug(f"[{login}] ответ Steam на закрепление кошелька: {wallet_resp!r}")
-
-    page_after = await _poll_store_page(steam, login, ready=lambda p: bool(p["wallet_fixed"]))
+    logger.info(f"[{login}] ответ Steam на закрепление кошелька: {wallet_resp!r}")
+    def _final_ready(p: dict) -> bool:
+        if not p:
+            return False
+        cc = p.get("country_code")
+        return bool(cc and cc.upper() == country_code.upper())
+    page_after = await _poll_store_page(steam, login, ready=_final_ready)
     if page_after is None:
         logger.warning(f"[{login}] страница после закрепления недоступна — повтор")
         return None
-
-    new_region = page_after["country_code"]
-    new_fixed = page_after["wallet_fixed"]
-    region_ok = new_region and new_region.upper() == country_code.upper()
-    wallet_ok = new_fixed
-
-    if region_ok and wallet_ok:
+    new_region = page_after.get("country_code")
+    new_fixed = page_after.get("wallet_fixed")
+    region_ok = bool(new_region and new_region.upper() == country_code.upper())
+    wallet_ok = bool(new_fixed)
+    if region_ok:
+        logger.info(f"[{login}] Регион Steam успешно изменён на {new_region} (закреплён балансом: {wallet_ok})")
         return AccountRegionResult(login, RegionResult.OK, new_region=new_region)
-    elif region_ok and not wallet_ok:
-        return AccountRegionResult(login, RegionResult.SENT, new_region=new_region)
-    elif not region_ok and wallet_ok:
-        return AccountRegionResult(
-            login, RegionResult.FAIL_WRONG_REGION, new_region=new_region,
-            error=f"Ожидался {country_code}, зафиксирован {new_region}",
-        )
-    logger.warning(
-        f"[{login}] регион не применился (текущий: {new_region!r}, нужен: {country_code}) — повтор"
-    )
-    return None
-
+    err_msg = f"Steam отклонил смену региона на {country_code} (текущий регион остался: {new_region or 'не определён'})"
+    if wallet_resp and "BadActivationCode" not in wallet_resp:
+        err_msg += f". Ответ: {wallet_resp[:80]}"
+    logger.warning(f"[{login}] {err_msg}")
+    return AccountRegionResult(login, RegionResult.FAIL_CHANGE, new_region=new_region, error=err_msg)
 async def process_one_account(
     login: str,
     password: str,
@@ -1057,12 +986,10 @@ async def process_one_account(
     max_attempts_override: int | None = None,
     cancel_event: asyncio.Event | None = None,
 ) -> AccountRegionResult:
-
     async with semaphore:
         if cancel_event is not None and cancel_event.is_set():
             return AccountRegionResult(login, RegionResult.SKIPPED, error="отменено пользователем")
         manual_mode = guard_provider is not None
-
         if manual_mode:
             Steam = await _try_import_manual_steam()
         else:
@@ -1073,45 +1000,42 @@ async def process_one_account(
                 status=RegionResult.ERROR,
                 error="pysteamauth не установлен. pip install pysteamauth",
             )
-
         if max_attempts_override is not None:
             max_attempts = max(1, max_attempts_override)
         else:
-
             max_attempts = max(len(proxy_pool) * 3, MAX_PROXY_ATTEMPTS_FLOOR)
         last_status = RegionResult.FAIL_CHANGE
         last_error: str | None = None
-
         guard_rejections = 0
         guard_reject_limit = 3
-
         attempt = 0
         while attempt < max_attempts:
             attempt += 1
             if attempt > 1:
                 if last_status == RegionResult.FAIL_RATE_LIMIT:
+                    rl_delay = RATE_LIMIT_DELAY
+                    try:
+                        rl_delay = int(_load_config().get("rate_limit_delay", RATE_LIMIT_DELAY))
+                    except Exception:
+                        pass
                     logger.info(
-                        f"[{login}] rate-limit Steam — пауза {RATE_LIMIT_DELAY}с "
+                        f"[{login}] rate-limit Steam — пауза {rl_delay}с "
                         f"(попытка {attempt}/{max_attempts})"
                     )
-                    await asyncio.sleep(RATE_LIMIT_DELAY)
+                    await asyncio.sleep(rl_delay)
                 else:
                     logger.info(f"[{login}] следующий прокси (попытка {attempt}/{max_attempts})")
-
             proxy = proxy_pool.get_next()
             if proxy is None:
-
                 _log_event("account_proxy_exhausted", level=logging.WARNING, login=login, reason="pool_empty")
                 last_status, last_error = RegionResult.FAIL_SESSION, "Все прокси недоступны (исключены из пула)"
                 break
-
             masked_px = _mask_proxy(proxy)
             _log_event("account_attempt", login=login, attempt=attempt, max=max_attempts, proxy=masked_px)
             strategy = ProxyRequestStrategy(proxy)
             try:
                 if manual_mode:
                     steam = Steam(login=login, password=password, request_strategy=strategy)
-
                     steam.set_guard_provider(guard_provider)
                 else:
                     steam = Steam(
@@ -1120,7 +1044,6 @@ async def process_one_account(
                         shared_secret=shared_secret,
                         request_strategy=strategy,
                     )
-
                 try:
                     await _net(steam.login_to_steam, label=login)
                 except GuardCodeSkipped:
@@ -1139,10 +1062,12 @@ async def process_one_account(
                     msg = str(e)
                     if "shared_secret is not specified" in msg:
                         return AccountRegionResult(login, RegionResult.FAIL_NO_MAFILE, error=msg)
+                    if isinstance(e, SteamLoginFailed) and "неверный логин или пароль" in msg.lower():
+                        return AccountRegionResult(login, RegionResult.FAIL_WRONG_PASS, error="Неверный логин или пароль Steam")
                     m = re.search(r"'code':\s*(\d+)", msg)
                     code_num = int(m.group(1)) if m else None
-                    if code_num == 5:
-                        return AccountRegionResult(login, RegionResult.FAIL_WRONG_PASS, error=msg)
+                    if code_num == 5 or "InvalidPassword" in msg or getattr(e, "error_code", None) == 5:
+                        return AccountRegionResult(login, RegionResult.FAIL_WRONG_PASS, error="Неверный логин или пароль Steam")
                     if code_num == 84:
                         last_status, last_error = RegionResult.FAIL_RATE_LIMIT, msg
                         _log_event("account_rate_limit", level=logging.WARNING, login=login, code=84, attempt=attempt)
@@ -1154,12 +1079,10 @@ async def process_one_account(
                         _log_event("account_steam_error", level=logging.WARNING, login=login, err=msg[:80])
                     last_status, last_error = RegionResult.FAIL_SESSION, msg
                     continue
-
                 if not await steam.is_authorized():
                     _log_event("account_not_authorized", level=logging.WARNING, login=login, attempt=attempt)
                     last_status = RegionResult.FAIL_SESSION
                     continue
-
                 try:
                     session_id = await _net(steam.sessionid, "store.steampowered.com", label=login)
                 except Exception:
@@ -1169,7 +1092,6 @@ async def process_one_account(
                         proxy_pool.ban(proxy)
                         _log_event("account_session_error", level=logging.WARNING, login=login, proxy=masked_px, err=str(e)[:80])
                         continue
-
                 result = await _region_change_core(steam, strategy, session_id, login, country_code)
                 if result is None:
                     continue
@@ -1179,7 +1101,6 @@ async def process_one_account(
                         gift_pool, password, shared_secret, guard_provider,
                     )
                 return result
-
             except Exception as e:
                 last_error = str(e)
                 if _is_network_error(e):
@@ -1190,13 +1111,11 @@ async def process_one_account(
                 continue
             finally:
                 await strategy.close()
-
         _log_event("account_change_failed", level=logging.WARNING, login=login, attempts=max_attempts, status=str(last_status))
         return AccountRegionResult(
             login, last_status,
             error=last_error or f"Не удалось сменить регион после {max_attempts} попыток",
         )
-
 async def process_one_account_qr(
     proxy_pool: "ProxyPool",
     country_code: str,
@@ -1205,12 +1124,10 @@ async def process_one_account_qr(
     poll_timeout: float = 180.0,
     begin_retries: int = 5,
 ) -> AccountRegionResult:
-
     QRSteam = await _try_import_qr_steam()
     if QRSteam is None:
         return AccountRegionResult("(qr)", RegionResult.ERROR,
                                    error="pysteamauth/QR недоступен. pip install pysteamauth")
-
     strategy = None
     steam = None
     account = None
@@ -1219,7 +1136,6 @@ async def process_one_account_qr(
     for _ in range(tries):
         proxy = proxy_pool.get_next()
         if proxy is None:
-
             return AccountRegionResult("(qr)", RegionResult.FAIL_SESSION,
                                        error=last_err or "Все прокси недоступны (исключены из пула)")
         strategy = ProxyRequestStrategy(proxy)
@@ -1228,7 +1144,6 @@ async def process_one_account_qr(
             account = await steam.login_via_qr(display_cb, poll_timeout=poll_timeout)
             break
         except asyncio.CancelledError:
-
             await strategy.close()
             raise
         except QRLoginTimeout as e:
@@ -1246,7 +1161,6 @@ async def process_one_account_qr(
     if strategy is None:
         return AccountRegionResult("(qr)", RegionResult.FAIL_SESSION,
                                    error=last_err or "нет рабочего прокси для QR")
-
     login = account or "(qr)"
     try:
         if not await steam.is_authorized():
@@ -1255,7 +1169,6 @@ async def process_one_account_qr(
             session_id = await _net(steam.sessionid, "store.steampowered.com", label=login)
         except Exception:
             session_id = await _net(steam.sessionid, "steamcommunity.com", label=login)
-
         result = await _region_change_core(steam, strategy, session_id, login, country_code)
         if result is None:
             return AccountRegionResult(login, RegionResult.FAIL_CHANGE,
@@ -1271,15 +1184,12 @@ async def process_one_account_qr(
         return AccountRegionResult(login, RegionResult.ERROR, error=str(e))
     finally:
         await strategy.close()
-
 def _gift_log(login: str, code: str, ok: bool, msg: str) -> None:
     logger.log(
         logging.INFO if ok else logging.WARNING,
-        f"[{login}] gift redeem {code!r}: {'OK' if ok else 'FAIL'} — {msg}",
+        f"[{login}] gift redeem {_mask_gift_code(code)}: {'OK' if ok else 'FAIL'} — {msg}",
     )
-
 async def _redeem_code_on_session(strategy, session_id, login: str, code: str) -> tuple[bool, str, bool]:
-
     try:
         resp = await strategy.request(
             URL_REDEEM_GIFT, method="POST",
@@ -1297,14 +1207,13 @@ async def _redeem_code_on_session(strategy, session_id, login: str, code: str) -
         msg = f"redeem error: {str(e)[:80]}"
         _gift_log(login, code, False, msg)
         return False, msg, _is_network_error(e)
-
     if resp.status in _RETRYABLE_HTTP:
         msg = f"HTTP {resp.status}"
         _gift_log(login, code, False, msg)
         return False, msg, True
     try:
         data = await resp.json(content_type=None)
-        success = data.get("success", 1) == 1
+        success = (data.get("success") == 1)
         detail = data.get("detail", "")
         if success:
             _gift_log(login, code, True, "OK")
@@ -1317,10 +1226,8 @@ async def _redeem_code_on_session(strategy, session_id, login: str, code: str) -
         text = await resp.text()
         _gift_log(login, code, False, text[:80])
         return False, text[:80], False
-
 async def _quick_login(proxy, login: str, password: str, shared_secret: str | None,
                        guard_provider: GuardProvider | None = None):
-
     strategy = ProxyRequestStrategy(proxy)
     try:
         if guard_provider is not None:
@@ -1354,13 +1261,11 @@ async def _quick_login(proxy, login: str, password: str, shared_secret: str | No
         logger.warning(f"[{login}] gift relogin failed: {str(e)[:80]}")
         await strategy.close()
         return None
-
 async def _activate_gifts_inline(
     strategy, session_id, proxy_pool: "ProxyPool",
     login: str, password: str, shared_secret: str | None, codes: list[str],
     guard_provider: GuardProvider | None = None,
 ) -> list[tuple[str, bool, str]]:
-
     results: list[tuple[str, bool, str]] = []
     cur_strategy, cur_sid = strategy, session_id
     extra_strategy = None
@@ -1385,7 +1290,6 @@ async def _activate_gifts_inline(
         if extra_strategy is not None:
             await extra_strategy.close()
     return results
-
 async def change_region_batch(
     accounts: list[dict],
     proxies: list[str],
@@ -1397,14 +1301,11 @@ async def change_region_batch(
     max_attempts_override: int | None = None,
     cancel_event: asyncio.Event | None = None,
 ) -> BatchRegionResult:
-
     manual_mode = guard_provider is not None
-
     workers = 1 if manual_mode else max(1, max_workers)
     semaphore = asyncio.Semaphore(workers)
     batch = BatchRegionResult(country_code=country_code, total=len(accounts))
     proxy_pool = ProxyPool(proxies)
-
     async def _worker(acc: dict) -> AccountRegionResult:
         return await process_one_account(
             login = acc["login"],
@@ -1418,9 +1319,7 @@ async def change_region_batch(
             max_attempts_override = max_attempts_override,
             cancel_event = cancel_event,
         )
-
     if manual_mode:
-
         done = 0
         try:
             for acc in accounts:
@@ -1448,10 +1347,8 @@ async def change_region_batch(
                     except Exception:
                         pass
         except asyncio.CancelledError:
-
             logger.info("change_region_batch (manual) отменён — частичный результат")
         return batch
-
     tasks = [asyncio.ensure_future(_worker(acc)) for acc in accounts]
     done = 0
     try:
@@ -1470,7 +1367,6 @@ async def change_region_batch(
                 except Exception:
                     pass
     except asyncio.CancelledError:
-
         for t in tasks:
             if not t.done():
                 t.cancel()
@@ -1478,7 +1374,6 @@ async def change_region_batch(
         batch.results = [r for r in gathered if isinstance(r, AccountRegionResult)]
         logger.info("change_region_batch отменён — частичный результат")
     return batch
-
 def parse_proxies(text: str) -> list[str]:
     proxies: list[str] = []
     raw_tokens = re.split(r'[\r\n,;]+', text or "")
@@ -1495,9 +1390,7 @@ def parse_proxies(text: str) -> list[str]:
                 proxies.append(norm)
     logger.info(f"[{NAME}] Распознано {len(proxies)} прокси из входного текста")
     return proxies
-
 def parse_gift_codes(text: str) -> list[str]:
-
     codes = []
     for line in text.splitlines():
         line = line.strip()
@@ -1507,14 +1400,11 @@ def parse_gift_codes(text: str) -> list[str]:
         if len(cleaned) >= 15:
             codes.append(cleaned.upper())
     return codes
-
 def validate_gift_codes_format(codes: list[str]) -> tuple[list[str], list[str]]:
-
     pattern = re.compile(r'^[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$|^[A-Z0-9]{15,20}$')
     valid = [c for c in codes if pattern.match(c)]
     invalid = [c for c in codes if not pattern.match(c)]
     return valid, invalid
-
 cardinal_instance = None
 bot_instance = None
 admin_chat_id = None
@@ -1557,6 +1447,10 @@ DEFAULT_BUYER_MESSAGES: dict[str, str] = {
         "На ваш мобильный Guard или почту отправлен проверочный код.\n"
         "Пожалуйста, отправьте 5-значный код сообщением в этот чат:"
     ),
+    "guard_received": (
+        "✅ Код Steam Guard принят!\n\n"
+        "⏳ Продолжаем вход в аккаунт и смену региона на {country_name}..."
+    ),
     "success": (
         "🎉 Регион Steam успешно изменён!\n\n"
         "• Новый регион: {country_name}\n"
@@ -1569,16 +1463,30 @@ DEFAULT_BUYER_MESSAGES: dict[str, str] = {
         "💸 Мы оформили автоматический возврат средств за ваш заказ #{order_id}.\n"
         "Деньги уже возвращены на ваш баланс FunPay."
     ),
+    "fixed_wallet_no_refund": (
+        "🛑 Смена региона невозможна!\n\n"
+        "На вашем Steam аккаунте обнаружены предыдущие пополнения баланса или покупки (смена региона доступна только на чистых аккаунтах без пополнений).\n\n"
+        "Пожалуйста, свяжитесь с продавцом в этом чате для урегулирования заказа."
+    ),
     "no_proxies_refund": (
         "⚠️ Временная недоступность прокси\n\n"
         "К сожалению, для целевого региона {country_name} временно закончились рабочие прокси в пуле.\n\n"
         "💸 Оформлен автоматический возврат средств за ваш заказ #{order_id}.\n"
         "Приносим извинения за неудобства!"
     ),
+    "no_proxies_no_refund": (
+        "⚠️ Временная недоступность прокси\n\n"
+        "К сожалению, для целевого региона {country_name} временно закончились рабочие прокси в пуле.\n\n"
+        "Пожалуйста, ожидайте ответа продавца в этом чате."
+    ),
     "error_refund": (
         "❌ Не удалось сменить регион Steam ({reason})\n\n"
         "💸 Мы оформили автоматический возврат средств за ваш заказ #{order_id}.\n"
         "Деньги уже возвращены на ваш баланс FunPay."
+    ),
+    "error_no_refund": (
+        "❌ Не удалось сменить регион Steam ({reason})\n\n"
+        "Пожалуйста, ожидайте ответа продавца в этом чате."
     ),
     "reminder_login": (
         "👋 Здравствуйте, {buyer_username}!\n\n"
@@ -1602,13 +1510,17 @@ BUYER_MESSAGE_LABELS: dict[str, str] = {
     "ask_password": "🔑 Шаг 2: Запрос пароля",
     "data_received": "⏳ Данные получены (старт)",
     "guard_request": "🔐 Запрос Steam Guard",
+    "guard_received": "✅ Код Guard принят",
     "success": "✅ Успешная смена региона",
     "reminder_login": "🔔 Напоминание: ввод логина",
     "reminder_password": "🔔 Напоминание: ввод пароля",
     "reminder_guard": "🔔 Напоминание: ввод Guard-кода",
     "fixed_wallet_refund": "🛑 Были пополнения (автовозврат)",
+    "fixed_wallet_no_refund": "🛑 Были пополнения (без автовозврата)",
     "no_proxies_refund": "⚠️ Закончились прокси (автовозврат)",
+    "no_proxies_no_refund": "⚠️ Закончились прокси (без автовозврата)",
     "error_refund": "❌ Ошибка смены (автовозврат)",
+    "error_no_refund": "❌ Ошибка смены (без автовозврата)",
 }
 
 BUYER_MESSAGE_HINTS: dict[str, str] = {
@@ -1616,13 +1528,17 @@ BUYER_MESSAGE_HINTS: dict[str, str] = {
     "ask_password": "Переменные: <code>{login}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
     "data_received": "Переменные: <code>{login}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
     "guard_request": "Переменные: <code>{login}</code>, <code>{order_id}</code>",
+    "guard_received": "Переменные: <code>{country_name}</code>, <code>{login}</code>, <code>{order_id}</code>",
     "success": "Переменные: <code>{country_name}</code>, <code>{login}</code>, <code>{order_id}</code>",
     "reminder_login": "Переменные: <code>{buyer_username}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
     "reminder_password": "Переменные: <code>{login}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
     "reminder_guard": "Переменные: <code>{login}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
     "fixed_wallet_refund": "Переменные: <code>{order_id}</code>, <code>{login}</code>",
+    "fixed_wallet_no_refund": "Переменные: <code>{order_id}</code>, <code>{login}</code>",
     "no_proxies_refund": "Переменные: <code>{order_id}</code>, <code>{country_name}</code>",
+    "no_proxies_no_refund": "Переменные: <code>{order_id}</code>, <code>{country_name}</code>",
     "error_refund": "Переменные: <code>{order_id}</code>, <code>{reason}</code>",
+    "error_no_refund": "Переменные: <code>{order_id}</code>, <code>{reason}</code>",
 }
 
 def _get_buyer_messages() -> dict[str, str]:
@@ -1634,7 +1550,6 @@ def _get_buyer_messages() -> dict[str, str]:
             if k in DEFAULT_BUYER_MESSAGES and v:
                 merged[k] = str(v)
     return merged
-
 def _render_buyer_msg(key: str, **kwargs) -> str:
     msgs = _get_buyer_messages()
     tmpl = msgs.get(key, DEFAULT_BUYER_MESSAGES.get(key, ""))
@@ -1653,7 +1568,6 @@ def _render_buyer_msg(key: str, **kwargs) -> str:
         for k, v in merged_kwargs.items():
             res = res.replace(f"{{{k}}}", str(v))
         return res
-
 DEFAULT_CONFIG: dict[str, Any] = {
     "plugin_enabled": True,
     "auto_refund_enabled": True,
@@ -1673,7 +1587,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 def _get_lots_dict(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
-
     raw = cfg.get("lots")
     res: dict[str, dict[str, Any]] = {}
     if isinstance(raw, dict):
@@ -1708,7 +1621,6 @@ def _get_lots_dict(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
                     "proxies": [],
                 }
     return res
-
 DEFAULT_STATS: dict[str, Any] = {
     "total_operations": 0,
     "success": 0,
@@ -1732,7 +1644,7 @@ def _init_storage():
     if not os.path.exists(STATS_FILE):
         with open(STATS_FILE, "w", encoding="utf-8") as f:
             json.dump(DEFAULT_STATS, f, indent=2, ensure_ascii=False)
-
+    _load_processed_orders()
 def _load_config() -> dict[str, Any]:
     with _config_lock:
         if not os.path.exists(CONFIG_FILE):
@@ -1747,7 +1659,6 @@ def _load_config() -> dict[str, Any]:
         except Exception as e:
             logger.error(f"[{NAME}] Ошибка чтения {CONFIG_FILE}: {e}")
             return dict(DEFAULT_CONFIG)
-
 def _save_config(cfg: dict[str, Any]) -> None:
     with _config_lock:
         try:
@@ -1755,27 +1666,31 @@ def _save_config(cfg: dict[str, Any]) -> None:
                 json.dump(cfg, f, indent=2, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[{NAME}] Ошибка сохранения {CONFIG_FILE}: {e}")
+_stats_lock = threading.Lock()
+_gifts_lock = threading.Lock()
+_in_flight_gift_codes: set[str] = set()
 
 def _load_stats() -> dict[str, Any]:
-    if not os.path.exists(STATS_FILE):
-        return dict(DEFAULT_STATS)
-    try:
-        with open(STATS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        res = dict(DEFAULT_STATS)
-        if isinstance(data, dict):
-            res.update(data)
-        return res
-    except Exception:
-        return dict(DEFAULT_STATS)
-
+    with _stats_lock:
+        if not os.path.exists(STATS_FILE):
+            return dict(DEFAULT_STATS)
+        try:
+            with open(STATS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            res = dict(DEFAULT_STATS)
+            if isinstance(data, dict):
+                res.update(data)
+            return res
+        except Exception as e:
+            logger.warning(f"[{NAME}] Ошибка чтения {STATS_FILE}: {e}")
+            return dict(DEFAULT_STATS)
 def _save_stats(st: dict[str, Any]) -> None:
-    try:
-        with open(STATS_FILE, "w", encoding="utf-8") as f:
-            json.dump(st, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
-
+    with _stats_lock:
+        try:
+            with open(STATS_FILE, "w", encoding="utf-8") as f:
+                json.dump(st, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[{NAME}] Ошибка сохранения {STATS_FILE}: {e}")
 def _load_proxies() -> list[str]:
     if not os.path.exists(PROXIES_FILE):
         return []
@@ -1785,31 +1700,63 @@ def _load_proxies() -> list[str]:
     except Exception as e:
         logger.error(f"[{NAME}] Ошибка чтения {PROXIES_FILE}: {e}")
         return []
-
 def _save_proxies(proxies: list[str]) -> None:
     try:
         with open(PROXIES_FILE, "w", encoding="utf-8") as f:
             f.write("\n".join(proxies) + ("\n" if proxies else ""))
     except Exception as e:
         logger.error(f"[{NAME}] Ошибка сохранения {PROXIES_FILE}: {e}")
-
 def _load_gift_codes() -> list[str]:
-    if not os.path.exists(GIFTS_FILE):
-        return []
-    try:
-        with open(GIFTS_FILE, "r", encoding="utf-8") as f:
-            return parse_gift_codes(f.read())
-    except Exception as e:
-        logger.error(f"[{NAME}] Ошибка чтения {GIFTS_FILE}: {e}")
-        return []
-
+    with _gifts_lock:
+        if not os.path.exists(GIFTS_FILE):
+            return []
+        try:
+            with open(GIFTS_FILE, "r", encoding="utf-8") as f:
+                return parse_gift_codes(f.read())
+        except Exception as e:
+            logger.error(f"[{NAME}] Ошибка чтения {GIFTS_FILE}: {e}")
+            return []
 def _save_gift_codes(codes: list[str]) -> None:
-    try:
-        with open(GIFTS_FILE, "w", encoding="utf-8") as f:
-            f.write("\n".join(codes) + ("\n" if codes else ""))
-    except Exception as e:
-        logger.error(f"[{NAME}] Ошибка сохранения {GIFTS_FILE}: {e}")
-
+    with _gifts_lock:
+        try:
+            with open(GIFTS_FILE, "w", encoding="utf-8") as f:
+                f.write("\n".join(codes) + ("\n" if codes else ""))
+        except Exception as e:
+            logger.error(f"[{NAME}] Ошибка сохранения {GIFTS_FILE}: {e}")
+def _reserve_gift_code() -> str | None:
+    with _gifts_lock:
+        if not os.path.exists(GIFTS_FILE):
+            return None
+        try:
+            with open(GIFTS_FILE, "r", encoding="utf-8") as f:
+                all_codes = parse_gift_codes(f.read())
+        except Exception:
+            return None
+        for code in all_codes:
+            if code not in _in_flight_gift_codes:
+                _in_flight_gift_codes.add(code)
+                return code
+        return None
+def _commit_gift_code(code: str) -> None:
+    if not code:
+        return
+    with _gifts_lock:
+        _in_flight_gift_codes.discard(code)
+        try:
+            all_codes = []
+            if os.path.exists(GIFTS_FILE):
+                with open(GIFTS_FILE, "r", encoding="utf-8") as f:
+                    all_codes = parse_gift_codes(f.read())
+            remaining = [c for c in all_codes if c != code]
+            with open(GIFTS_FILE, "w", encoding="utf-8") as f:
+                f.write("\n".join(remaining) + ("\n" if remaining else ""))
+        except Exception as e:
+            logger.error(f"[{NAME}] Ошибка списания гифт-кода {_mask_gift_code(code)}: {e}")
+def _release_gift_code(code: str) -> None:
+    if not code:
+        return
+    with _gifts_lock:
+        _in_flight_gift_codes.discard(code)
 def _list_mafiles() -> list[str]:
     if not os.path.exists(MAFILES_DIR):
         return []
@@ -1817,20 +1764,19 @@ def _list_mafiles() -> list[str]:
         return [f for f in os.listdir(MAFILES_DIR) if f.endswith(".maFile")]
     except Exception:
         return []
-
 def _country_display(code: str) -> str:
     code = (code or "").upper()
     return COUNTRY_NAMES.get(code, f"🌐 {code}")
-
 def _is_authorized(user_id) -> bool:
+    if user_id is None:
+        return False
     try:
         auth = getattr(getattr(cardinal_instance, 'telegram', None), 'authorized_users', None)
         if isinstance(auth, dict) and auth:
-            return user_id in auth or int(user_id) in auth
-    except Exception:
-        pass
-    return True
-
+            return user_id in auth or int(user_id) in auth or str(user_id) in auth
+    except Exception as e:
+        logger.warning(f"[{NAME}] Ошибка проверки авторизации TG: {e}")
+    return False
 def _tg_send(chat_id, text: str, reply_markup=None) -> None:
     if not bot_instance or not chat_id:
         return
@@ -1838,7 +1784,6 @@ def _tg_send(chat_id, text: str, reply_markup=None) -> None:
         bot_instance.send_message(int(chat_id), text, parse_mode='HTML', reply_markup=reply_markup, disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"[{NAME}] TG send error: {e}")
-
 def _tg_edit(chat_id, message_id, text: str, reply_markup=None) -> None:
     if not bot_instance or not chat_id or not message_id:
         return
@@ -1846,9 +1791,7 @@ def _tg_edit(chat_id, message_id, text: str, reply_markup=None) -> None:
         bot_instance.edit_message_text(text, int(chat_id), int(message_id), parse_mode='HTML', reply_markup=reply_markup, disable_web_page_preview=True)
     except Exception:
         _tg_send(chat_id, text, reply_markup)
-
 def _notify_tg(text: str, ntype: str = "order") -> None:
-
     cfg = _load_config()
     if ntype == "order" and not cfg.get("notify_tg_orders", True):
         return
@@ -1856,7 +1799,6 @@ def _notify_tg(text: str, ntype: str = "order") -> None:
         return
     if ntype == "error" and not cfg.get("notify_tg_errors", True):
         return
-
     targets = []
     if cardinal_instance and getattr(cardinal_instance, 'telegram', None):
         auth = getattr(cardinal_instance.telegram, 'authorized_users', None)
@@ -1864,16 +1806,13 @@ def _notify_tg(text: str, ntype: str = "order") -> None:
             targets = list(auth.keys())
     if not targets and admin_chat_id:
         targets = [admin_chat_id]
-
     if not targets or not bot_instance:
         return
-
     for cid in targets:
         try:
             _tg_send(cid, text)
         except Exception as e:
             logger.debug(f"[{NAME}] TG notification failed: {e}")
-
 def _make_kb(rows: list[list[tuple[str, str]]]):
     if not tg_types:
         return None
@@ -1881,12 +1820,10 @@ def _make_kb(rows: list[list[tuple[str, str]]]):
     for row in rows:
         kb.row(*[tg_types.InlineKeyboardButton(text, callback_data=data) for text, data in row])
     return kb
-
 def _mask_secret(val: str, prefix_len=3, suffix_len=3) -> str:
     if len(val) <= prefix_len + suffix_len:
         return "***"
     return f"{val[:prefix_len]}...{val[-suffix_len:]}"
-
 def _about_text():
     return (
         f"🧩 <b>Плагин:</b> {NAME}\n"
@@ -1894,18 +1831,15 @@ def _about_text():
         f"👤 <b>Автор:</b> <a href=\"{CREATOR_URL}\">{CREDITS}</a>\n\n"
         "Выберите раздел ниже."
     )
-
 def _home_kb():
     return _make_kb([
         [("⚙️ Настройки", "src_settings_panel"), ("ℹ️ Информация", "src_info")],
         [("⬆️ Обновить плагин", "src_update_menu"), ("🗑 Удалить", "src_delete_ask")],
         [("🔙 К списку плагинов", CB_PLUGINS_LIST_OPEN)],
     ])
-
 def _open_home(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     _tg_edit(chat_id, message_id, _about_text(), _home_kb()) if message_id else _tg_send(chat_id, _about_text(), _home_kb())
-
 def _info_text():
     return (
         "ℹ️ <b>Информация</b>\n\n"
@@ -1915,7 +1849,6 @@ def _info_text():
         "• <b>Инструкция</b> - настройка и использование плагина.\n"
         "• <b>Мой Telegram</b> - связь с автором."
     )
-
 def _info_kb():
     if not tg_types:
         return None
@@ -1926,11 +1859,9 @@ def _info_kb():
     kb.row(tg_types.InlineKeyboardButton("👤 Мой Telegram", url=CREATOR_URL))
     kb.add(tg_types.InlineKeyboardButton("◀️ Назад", callback_data="src_home"))
     return kb
-
 def _open_info(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     _tg_edit(chat_id, message_id, _info_text(), _info_kb()) if message_id else _tg_send(chat_id, _info_text(), _info_kb())
-
 def _update_menu_text():
     return (
         f"⬆️ <b>Обновление {NAME}</b>\n\n"
@@ -1939,18 +1870,15 @@ def _update_menu_text():
         "• <b>Обновить онлайн</b> — проверить новую версию и скачать её с GitHub.\n\n"
         "Перед заменой автоматически создаётся резервная копия текущего плагина и настроек."
     )
-
 def _update_menu_kb():
     return _make_kb([
         [("📥 Обновить локально", "src_update_local")],
         [("🌐 Обновить онлайн", "src_update_online")],
         [("◀️ Назад", "src_home")],
     ])
-
 def _open_update_menu(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     _tg_edit(chat_id, message_id, _update_menu_text(), _update_menu_kb()) if message_id else _tg_send(chat_id, _update_menu_text(), _update_menu_kb())
-
 def _delete_confirm_text():
     return (
         "⚠️ <b>Удаление плагина</b>\n\n"
@@ -1961,16 +1889,13 @@ def _delete_confirm_text():
         "<b>Действие необратимо.</b>\n"
         "После удаления выполните перезапуск: напишите команду <code>/restart</code>."
     )
-
 def _delete_confirm_kb():
     return _make_kb([
         [("✅ Да, удалить", "src_delete_yes"), ("❌ Нет", "src_home")],
     ])
-
 def _open_delete_confirm(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     _tg_edit(chat_id, message_id, _delete_confirm_text(), _delete_confirm_kb()) if message_id else _tg_send(chat_id, _delete_confirm_text(), _delete_confirm_kb())
-
 def _settings_panel_text(chat_id):
     cfg = _load_config()
     plugin_state = "🟢 Включено" if cfg.get("plugin_enabled", True) else "🔴 Выключено"
@@ -1979,7 +1904,6 @@ def _settings_panel_text(chat_id):
     active_lots = sum(1 for l in lots.values() if l.get("enabled", False))
     proxies = _load_proxies()
     gifts = _load_gift_codes()
-
     return (
         "⚙️ <b>Панель настроек</b>\n\n"
         f"• Плагин: <b>{plugin_state}</b>\n"
@@ -1987,7 +1911,6 @@ def _settings_panel_text(chat_id):
         f"• База: <code>{len(proxies)}</code> прокси / <code>{len(gifts)}</code> гифтов\n\n"
         "Выберите раздел:"
     )
-
 def _settings_panel_kb(chat_id):
     cfg = _load_config()
     lots = _get_lots_dict(cfg)
@@ -1998,13 +1921,11 @@ def _settings_panel_kb(chat_id):
         [("◀️ Назад", "src_home")],
     ]
     return _make_kb(rows)
-
 def _open_settings_panel(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     text = _settings_panel_text(chat_id)
     kb = _settings_panel_kb(chat_id)
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _mini_settings_text(chat_id):
     cfg = _load_config()
     enabled = cfg.get("plugin_enabled", True)
@@ -2016,7 +1937,6 @@ def _mini_settings_text(chat_id):
     timeout = cfg.get("request_timeout", 30.0)
     gifts = _load_gift_codes()
     lots = _get_lots_dict(cfg)
-
     return (
         f"⚙️ <b>Настройки плагина</b>\n\n"
         f"• Состояние: <b>{'🟢 включён' if enabled else '🔴 выключен'}</b>\n"
@@ -2030,7 +1950,6 @@ def _mini_settings_text(chat_id):
         f"• Привязано лотов: <b>{len(lots)} шт.</b>\n\n"
         "Выберите категорию:"
     )
-
 def _mini_settings_kb(chat_id):
     cfg = _load_config()
     enabled = cfg.get("plugin_enabled", True)
@@ -2044,13 +1963,11 @@ def _mini_settings_kb(chat_id):
         [("◀️ Назад", "src_settings_panel")],
     ]
     return _make_kb(rows)
-
 def _open_mini_settings(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     text = _mini_settings_text(chat_id)
     kb = _mini_settings_kb(chat_id)
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _notif_menu_text():
     cfg = _load_config()
     n_ord = cfg.get("notify_tg_orders", True)
@@ -2067,7 +1984,6 @@ def _notif_menu_text():
         "  <i>(Оповещение о неудачной смене, пополненном кошельке или автовозврате)</i>\n\n"
         "Нажмите на кнопку для переключения:"
     )
-
 def _notif_menu_kb():
     cfg = _load_config()
     n_ord = cfg.get("notify_tg_orders", True)
@@ -2080,13 +1996,11 @@ def _notif_menu_kb():
         [("◀️ Назад", "src_mini_settings")],
     ]
     return _make_kb(rows)
-
 def _open_notif_menu(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     text = _notif_menu_text()
     kb = _notif_menu_kb()
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _orders_menu_text():
     cfg = _load_config()
     auto_refund = cfg.get("auto_refund_enabled", True)
@@ -2105,7 +2019,6 @@ def _orders_menu_text():
         "  <i>(Если у лота закончились рабочие прокси — лот автоматически деактивируется на FunPay)</i>\n\n"
         "Выберите параметр для переключения:"
     )
-
 def _orders_menu_kb():
     cfg = _load_config()
     auto_refund = cfg.get("auto_refund_enabled", True)
@@ -2121,20 +2034,17 @@ def _orders_menu_kb():
         [("◀️ Назад", "src_mini_settings")],
     ]
     return _make_kb(rows)
-
 def _open_orders_menu(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     text = _orders_menu_text()
     kb = _orders_menu_kb()
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _messages_menu_text():
     return (
         "💬 <b>Шаблоны сообщений покупателям</b>\n\n"
         "Здесь вы можете изменить тексты сообщений, которые плагин отправляет покупателям в чат FunPay при обработке заказа.\n\n"
         "Выберите сообщение для настройки:"
     )
-
 def _messages_menu_kb():
     rows = []
     for key, label in BUYER_MESSAGE_LABELS.items():
@@ -2142,13 +2052,11 @@ def _messages_menu_kb():
     rows.append([("🔄 Сбросить все шаблоны", "src_msg_reset_all")])
     rows.append([("◀️ Назад", "src_cat_orders")])
     return _make_kb(rows)
-
 def _open_messages_menu(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     text = _messages_menu_text()
     kb = _messages_menu_kb()
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _open_msg_editor(chat_id, key, message_id=None):
     _waiting[chat_id] = {"action": "edit_buyer_message", "key": key, "prompt_id": message_id}
     label = BUYER_MESSAGE_LABELS.get(key, key)
@@ -2168,7 +2076,6 @@ def _open_msg_editor(chat_id, key, message_id=None):
         [("◀️ К списку сообщений", "src_cat_messages")],
     ])
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _queue_menu_text():
     cfg = _load_config()
     workers = cfg.get("max_workers", 5)
@@ -2181,7 +2088,6 @@ def _queue_menu_text():
         f"• Задержка при Steam rate-limit: <b>{delay} сек</b>\n\n"
         "Здесь настраивается многопоточность для смены региона и сетевые таймауты запросов через прокси."
     )
-
 def _queue_menu_kb():
     cfg = _load_config()
     workers = cfg.get("max_workers", 5)
@@ -2192,13 +2098,11 @@ def _queue_menu_kb():
         [("◀️ Назад", "src_mini_settings")],
     ]
     return _make_kb(rows)
-
 def _open_queue_menu(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     text = _queue_menu_text()
     kb = _queue_menu_kb()
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _gifts_menu_text():
     cfg = _load_config()
     redeem = cfg.get("auto_redeem_gift", True)
@@ -2209,14 +2113,12 @@ def _gifts_menu_text():
         preview.append(f"{i}. <code>{masked}</code>")
     preview_str = "\n".join(preview) if preview else "<i>(база пуста)</i>"
     more = f"\n<i>... и ещё {len(codes) - 5} кодов</i>" if len(codes) > 5 else ""
-
     return (
         "🎁 <b>Управление гифтами Steam Wallet</b>\n\n"
         f"• Активация гифта при смене: <b>{'🟢 ВКЛ' if redeem else '🔴 ВЫКЛ'}</b>\n"
         f"• Всего кодов в базе: <b>{len(codes)} шт.</b>\n\n"
         f"<b>Доступные коды:</b>\n{preview_str}{more}"
     )
-
 def _gifts_menu_kb():
     cfg = _load_config()
     redeem = cfg.get("auto_redeem_gift", True)
@@ -2229,13 +2131,11 @@ def _gifts_menu_kb():
         rows.append([("🗑 Очистить базу гифтов", "src_clear_gifts_ask")])
     rows.append([("◀️ Назад", "src_mini_settings")])
     return _make_kb(rows)
-
 def _menu_gifts(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     text = _gifts_menu_text()
     kb = _gifts_menu_kb()
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _proxies_menu_text():
     proxies = _load_proxies()
     preview = []
@@ -2244,7 +2144,6 @@ def _proxies_menu_text():
         preview.append(f"{i}. <code>{clean_p}</code>")
     preview_str = "\n".join(preview) if preview else "<i>(список пуст)</i>"
     more = f"\n<i>... и ещё {len(proxies) - 5} прокси</i>" if len(proxies) > 5 else ""
-
     return (
         "🌐 <b>Управление общей базой прокси</b>\n\n"
         f"• Всего прокси в пуле: <b>{len(proxies)} шт.</b>\n"
@@ -2255,7 +2154,6 @@ def _proxies_menu_text():
         "• <code>ip:port:user:pass</code>\n"
         "• <code>http://user:pass@ip:port</code>"
     )
-
 def _proxies_menu_kb():
     rows = [
         [("➕ Добавить прокси текстом", "src_input_proxies")],
@@ -2263,13 +2161,11 @@ def _proxies_menu_kb():
         [("◀️ Назад", "src_mini_settings")],
     ]
     return _make_kb(rows)
-
 def _menu_proxies(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     text = _proxies_menu_text()
     kb = _proxies_menu_kb()
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _maint_menu_text():
     return (
         "🧰 <b>Обслуживание плагина</b>\n\n"
@@ -2277,7 +2173,6 @@ def _maint_menu_text():
         "• <b>Конфигурация</b> — резервное копирование и восстановление настроек (settings.json).\n"
         "• <b>Скачать логи</b> — выгрузка лог-файлов Cardinal и плагина."
     )
-
 def _maint_menu_kb():
     rows = [
         [("⚙️ Конфигурация", "src_maint_cfg_menu")],
@@ -2285,13 +2180,11 @@ def _maint_menu_kb():
         [("◀️ Назад", "src_mini_settings")],
     ]
     return _make_kb(rows)
-
 def _open_maint_menu(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     text = _maint_menu_text()
     kb = _maint_menu_kb()
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _maint_cfg_menu_text():
     cfg = _load_config()
     lots = _get_lots_dict(cfg)
@@ -2301,7 +2194,6 @@ def _maint_cfg_menu_text():
         f"• Привязано лотов: <b>{len(lots)} шт.</b>\n\n"
         "Выберите действие:"
     )
-
 def _maint_cfg_menu_kb():
     rows = [
         [("💾 Скачать конфиг (.json)", "src_maint_export_cfg")],
@@ -2309,13 +2201,11 @@ def _maint_cfg_menu_kb():
         [("◀️ Назад", "src_cat_maint")],
     ]
     return _make_kb(rows)
-
 def _open_maint_cfg_menu(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     text = _maint_cfg_menu_text()
     kb = _maint_cfg_menu_kb()
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 LOTS_PER_PAGE = 5
 
 def _open_lots_menu(chat_id, message_id=None, page: int = 0):
@@ -2324,25 +2214,20 @@ def _open_lots_menu(chat_id, message_id=None, page: int = 0):
     lots = _get_lots_dict(cfg)
     total_lots = len(lots)
     active_lots = sum(1 for l in lots.values() if l.get("enabled", False))
-
     text = (
         f"⭐ <b>Настройка лотов {NAME}</b>\n\n"
         f"• Всего лотов в плагине: <b>{total_lots} шт.</b>\n"
         f"• Активных: <b>🟢 {active_lots}</b> | Выключенных: <b>🔴 {total_lots - active_lots}</b>"
     )
-
     rows: list[list[tuple[str, str]]] = [
         [("🔄 Автодобавление (кат. 2044)", "src_lots_auto_2044"), ("➕ Добавить вручную", "src_lot_add_wizard")],
     ]
     lot_items = list(lots.values())
-
     total_pages = max(1, (total_lots + LOTS_PER_PAGE - 1) // LOTS_PER_PAGE) if total_lots > 0 else 1
     page = max(0, min(page, total_pages - 1))
-
     start = page * LOTS_PER_PAGE
     end = start + LOTS_PER_PAGE
     page_lots = lot_items[start:end]
-
     for l in page_lots:
         lid = str(l["id"])
         st_ico = "🟢" if l.get("enabled", False) else "🔴"
@@ -2350,7 +2235,6 @@ def _open_lots_menu(chat_id, message_id=None, page: int = 0):
         px_cnt = len(l.get("proxies") or [])
         lbl = f"{st_ico} #{lid} · {_country_display(cc)} ({px_cnt} px)"
         rows.append([(lbl, f"src_lot_card:{lid}")])
-
     if total_pages > 1:
         nav = []
         if page > 0:
@@ -2359,12 +2243,9 @@ def _open_lots_menu(chat_id, message_id=None, page: int = 0):
         if page < total_pages - 1:
             nav.append(("След. ▶️", f"src_lots_page:{page + 1}"))
         rows.append(nav)
-
     rows.append([("◀️ Назад", "src_settings_panel")])
-
     kb = _make_kb(rows)
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _open_lot_card(chat_id, lot_id: str, message_id=None):
     _waiting.pop(chat_id, None)
     cfg = _load_config()
@@ -2374,12 +2255,10 @@ def _open_lot_card(chat_id, lot_id: str, message_id=None):
         _tg_send(chat_id, f"⚠️ Лот #{lot_id} не найден.")
         _open_lots_menu(chat_id, message_id)
         return
-
     title = lot.get("title", f"Лот {lot_id}")
     enabled = lot.get("enabled", True)
     country = lot.get("country", "KZ")
     proxies = lot.get("proxies", [])
-
     text = (
         f"📦 <b>Настройки лота #{lot_id}</b>\n\n"
         f"• Название: <i>{title}</i>\n"
@@ -2387,7 +2266,6 @@ def _open_lot_card(chat_id, lot_id: str, message_id=None):
         f"• Целевая страна: <b>{_country_display(country)}</b> (<code>{country}</code>)\n"
         f"• Привязано прокси: <b>{len(proxies)} шт.</b>"
     )
-
     rows = [
         [(f"🧩 Состояние: {'🟢 ВКЛ' if enabled else '🔴 ВЫКЛ'}", f"src_lot_tgl:{lot_id}")],
         [(f"🌍 Изменить страну ({country})", f"src_lot_change_cc:{lot_id}")],
@@ -2397,7 +2275,6 @@ def _open_lot_card(chat_id, lot_id: str, message_id=None):
     ]
     kb = _make_kb(rows)
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _lot_proxies_menu_text(lot_id: str):
     cfg = _load_config()
     lots = _get_lots_dict(cfg)
@@ -2405,7 +2282,6 @@ def _lot_proxies_menu_text(lot_id: str):
     title = lot.get("title", f"Лот {lot_id}")
     country = lot.get("country", "KZ")
     proxies = lot.get("proxies", [])
-
     preview = []
     for i, p in enumerate(proxies[:5], 1):
         clean_p = re.sub(r':([^@:]+)@', ':***@', p)
@@ -2413,7 +2289,6 @@ def _lot_proxies_menu_text(lot_id: str):
     px_preview = "\n".join(preview) if preview else "<i>(нет привязанных прокси — добавьте для работы смены региона!)</i>"
     if len(proxies) > 5:
         px_preview += f"\n<i>... и ещё {len(proxies) - 5} прокси</i>"
-
     return (
         f"🌐 <b>Настройка прокси лота #{lot_id}</b>\n\n"
         f"• Лот: <i>{title}</i>\n"
@@ -2422,7 +2297,6 @@ def _lot_proxies_menu_text(lot_id: str):
         f"<b>Текущие прокси:</b>\n{px_preview}\n\n"
         "💡 <i>Вы можете добавить прокси текстом или файлом .txt, проверить их доступность или экспортировать.</i>"
     )
-
 def _lot_proxies_menu_kb(lot_id: str):
     cfg = _load_config()
     lots = _get_lots_dict(cfg)
@@ -2434,20 +2308,17 @@ def _lot_proxies_menu_kb(lot_id: str):
         rows.append([("🧪 Тестировать прокси", f"src_lot_test_px:{lot_id}"), ("🗑 Очистить прокси", f"src_lot_clear_px:{lot_id}")])
     rows.append([("◀️ Назад к лоту", f"src_lot_card:{lot_id}")])
     return _make_kb(rows)
-
 def _open_lot_proxies_menu(chat_id, lot_id: str, message_id=None):
     _waiting.pop(chat_id, None)
     text = _lot_proxies_menu_text(lot_id)
     kb = _lot_proxies_menu_kb(lot_id)
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _open_lot_change_cc(chat_id, lot_id: str, message_id=None):
     _waiting.pop(chat_id, None)
     cfg = _load_config()
     lots = _get_lots_dict(cfg)
     lot = lots.get(str(lot_id)) or {}
     cur_cc = lot.get("country", "KZ")
-
     text = (
         f"🌍 <b>Выбор страны для лота #{lot_id}</b>\n\n"
         f"Текущая страна: <b>{_country_display(cur_cc)}</b> (<code>{cur_cc}</code>)\n\n"
@@ -2462,7 +2333,6 @@ def _open_lot_change_cc(chat_id, lot_id: str, message_id=None):
     ]
     kb = _make_kb(rows)
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _test_lot_proxies_worker(chat_id, lot_id: str, message_id=None):
     cfg = _load_config()
     lots = _get_lots_dict(cfg)
@@ -2471,10 +2341,8 @@ def _test_lot_proxies_worker(chat_id, lot_id: str, message_id=None):
     if not proxies:
         _tg_edit(chat_id, message_id, f"⚠️ У лота #{lot_id} нет привязанных прокси.", _make_kb([[("◀️ Назад", f"src_lot_px_menu:{lot_id}")]]))
         return
-
     _tg_edit(chat_id, message_id, f"⏳ <b>Тестирование {len(proxies)} прокси лота #{lot_id}...</b>\nПожалуйста, подождите.", _make_kb([[("◀️ Назад", f"src_lot_px_menu:{lot_id}")]]))
     _log_event("lot_proxy_test_start", lot_id=lot_id, count=len(proxies))
-
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     async def _test():
@@ -2497,7 +2365,6 @@ def _test_lot_proxies_worker(chat_id, lot_id: str, message_id=None):
                     _log_event("lot_proxy_test", level=logging.WARNING, status="fail", lot_id=lot_id, proxy=clean_p, diag=diag)
         await asyncio.gather(*[_check(p) for p in proxies])
         return alive, dead, details
-
     try:
         alive, dead, details = loop.run_until_complete(_test())
         _log_event("lot_proxy_summary", lot_id=lot_id, total=len(proxies), alive=alive, dead=dead)
@@ -2516,16 +2383,12 @@ def _test_lot_proxies_worker(chat_id, lot_id: str, message_id=None):
         res_text = f"❌ Ошибка проверки: {e}"
     finally:
         loop.close()
-
     _tg_edit(chat_id, message_id, res_text, _make_kb([[("🔄 Проверить снова", f"src_lot_test_px:{lot_id}"), ("◀️ К прокси лота", f"src_lot_px_menu:{lot_id}")]]))
-
 def _handle_auto_lots_2044(chat_id, message_id=None):
     if not cardinal_instance or not getattr(cardinal_instance, 'account', None):
         _tg_edit(chat_id, message_id, "⚠️ Аккаунт FunPay в Cardinal не инициализирован. Убедитесь, что Cardinal запущен и авторизован в FunPay.", _make_kb([[("◀️ Назад", "src_lots_menu")]]))
         return
-
     _tg_edit(chat_id, message_id, "⏳ <b>Поиск ваших лотов в категории 2044...</b>", _make_kb([[("◀️ Назад", "src_lots_menu")]]))
-
     def _worker():
         try:
             account = cardinal_instance.account
@@ -2534,7 +2397,6 @@ def _handle_auto_lots_2044(chat_id, message_id=None):
                 found_lots = account.get_my_subcategory_lots(2044)
             except Exception as e:
                 logger.warning(f"[{NAME}] get_my_subcategory_lots(2044): {e}")
-
             if not found_lots and getattr(account, 'id', None):
                 try:
                     profile = account.get_user(int(account.id))
@@ -2545,16 +2407,13 @@ def _handle_auto_lots_2044(chat_id, message_id=None):
                                 found_lots.append(lot)
                 except Exception as e:
                     logger.warning(f"[{NAME}] get_user lots fallback: {e}")
-
             if not found_lots:
                 _tg_edit(chat_id, message_id, "ℹ️ В категории 2044 не найдено ваших лотов. Создайте лот на FunPay или добавьте лот вручную по ID.", _make_kb([[("➕ Добавить вручную", "src_lot_add_wizard"), ("◀️ Назад", "src_lots_menu")]]))
                 return
-
             cfg = _load_config()
             lots = _get_lots_dict(cfg)
             added_cnt = 0
             already_cnt = 0
-
             for l in found_lots:
                 lid = str(getattr(l, 'id', '') or '')
                 if not lid:
@@ -2562,7 +2421,6 @@ def _handle_auto_lots_2044(chat_id, message_id=None):
                 if lid in lots:
                     already_cnt += 1
                     continue
-
                 title = str(getattr(l, 'description', None) or getattr(l, 'title', None) or f"Лот {lid}")
                 t_low = title.lower()
                 cc = "KZ"
@@ -2578,7 +2436,6 @@ def _handle_auto_lots_2044(chat_id, message_id=None):
                     cc = "US"
                 elif any(k in t_low for k in ["аргентин", "песо", " ar", "(ar)"]):
                     cc = "AR"
-
                 lots[lid] = {
                     "id": lid,
                     "title": title,
@@ -2587,10 +2444,8 @@ def _handle_auto_lots_2044(chat_id, message_id=None):
                     "proxies": [],
                 }
                 added_cnt += 1
-
             cfg["lots"] = lots
             _save_config(cfg)
-
             msg = (
                 f"✅ <b>Автодобавление лотов (кат. 2044) завершено!</b>\n\n"
                 f"• Найдено лотов: <b>{len(found_lots)} шт.</b>\n"
@@ -2601,9 +2456,7 @@ def _handle_auto_lots_2044(chat_id, message_id=None):
         except Exception as e:
             logger.error(f"[{NAME}] Ошибка автодобавления лотов: {e}", exc_info=True)
             _tg_edit(chat_id, message_id, f"❌ Ошибка сканирования: {e}", _make_kb([[("◀️ Назад", "src_lots_menu")]]))
-
     threading.Thread(target=_worker, daemon=True).start()
-
 def _start_lot_wizard(chat_id, message_id=None):
     _waiting[chat_id] = {"action": "wiz_step1_id", "prompt_id": message_id}
     text = (
@@ -2612,7 +2465,6 @@ def _start_lot_wizard(chat_id, message_id=None):
     )
     kb = _make_kb([[("❌ Отмена", "src_lots_menu")]])
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _lot_wizard_ask_country(chat_id, lot_id: str, title: str, message_id=None):
     _waiting[chat_id] = {"action": "wiz_step2_country", "lot_id": lot_id, "title": title, "prompt_id": message_id}
     text = (
@@ -2629,7 +2481,6 @@ def _lot_wizard_ask_country(chat_id, lot_id: str, title: str, message_id=None):
     ]
     kb = _make_kb(rows)
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _lot_wizard_ask_proxy(chat_id, lot_id: str, title: str, cc: str, message_id=None):
     _waiting[chat_id] = {"action": "wiz_step3_proxy", "lot_id": lot_id, "title": title, "country": cc, "prompt_id": message_id}
     text = (
@@ -2645,16 +2496,13 @@ def _lot_wizard_ask_proxy(chat_id, lot_id: str, title: str, cc: str, message_id=
     )
     kb = _make_kb([[("❌ Отмена", "src_lots_menu")]])
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _test_proxies_worker(chat_id, message_id=None):
     proxies = _load_proxies()
     if not proxies:
         _tg_edit(chat_id, message_id, "⚠️ Список прокси пуст. Добавьте прокси для проверки.", _make_kb([[("◀️ Назад", "src_proxies")]]))
         return
-
     _tg_edit(chat_id, message_id, f"⏳ <b>Тестирование {len(proxies)} прокси...</b>\nПожалуйста, подождите.", _make_kb([[("◀️ Назад", "src_proxies")]]))
     _log_event("pool_proxy_test_start", count=len(proxies))
-
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     async def _test_all():
@@ -2677,7 +2525,6 @@ def _test_proxies_worker(chat_id, message_id=None):
                     _log_event("pool_proxy_test", level=logging.WARNING, status="fail", proxy=clean_p, diag=diag)
         await asyncio.gather(*[_check(p) for p in proxies])
         return alive, dead, details
-
     try:
         alive, dead, details = loop.run_until_complete(_test_all())
         _log_event("pool_proxy_summary", total=len(proxies), alive=alive, dead=dead)
@@ -2696,10 +2543,8 @@ def _test_proxies_worker(chat_id, message_id=None):
         res_text = f"❌ Ошибка проверки прокси: {e}"
     finally:
         loop.close()
-
     kb = _make_kb([[("🔄 Проверить снова", "src_test_proxies"), ("◀️ К прокси", "src_proxies")]])
     _tg_edit(chat_id, message_id, res_text, kb)
-
 def _stats_text():
     stats = _load_stats()
     return (
@@ -2710,24 +2555,20 @@ def _stats_text():
         f"• Активировано гифтов: <b>🎁 {stats.get('gifts_redeemed', 0)}</b>\n"
         f"• Последняя операция: <code>{stats.get('last_operation', 'нет данных')}</code>"
     )
-
 def _stats_kb():
     return _make_kb([
         [("🔄 Сбросить статистику", "src_stats_reset")],
         [("◀️ Назад", "src_settings_panel")],
     ])
-
 def _open_stats(chat_id, message_id=None):
     _waiting.pop(chat_id, None)
     text = _stats_text()
     kb = _stats_kb()
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
-
 def _plugin_version_key(value):
     nums = [int(x) for x in re.findall(r'\d+', str(value or ''))[:4]]
     nums.extend([0] * (4 - len(nums)))
     return tuple(nums[:4])
-
 def _online_update_worker(chat_id, message_id=None):
     _tg_edit(chat_id, message_id, "⏳ <b>Проверка обновлений на GitHub...</b>", _make_kb([[("◀️ Назад", "src_update_menu")]]))
     try:
@@ -2744,55 +2585,45 @@ def _online_update_worker(chat_id, message_id=None):
         if _plugin_version_key(remote_version) <= _plugin_version_key(VERSION):
             _tg_edit(chat_id, message_id, f"✅ <b>У вас уже установлена актуальная версия {VERSION}.</b>", _make_kb([[("◀️ Назад", "src_update_menu")]]))
             return
-
         plugin_file = os.path.abspath(__file__)
         stamp = time.strftime('%Y%m%d-%H%M%S')
         backup_file = plugin_file + f'.pre-online-update.{stamp}.bak'
         shutil.copy2(plugin_file, backup_file)
-
         with open(plugin_file, "w", encoding="utf-8") as f:
             f.write(source)
-
         text = f"✅ <b>Онлайн-обновление установлено: v{remote_version}!</b>\n\nРезервная копия сохранена в <code>{os.path.basename(backup_file)}</code>.\nВыполните <code>/restart</code> для применения."
         _tg_edit(chat_id, message_id, text, _make_kb([[("◀️ В меню", "src_home")]]))
     except Exception as e:
         _tg_edit(chat_id, message_id, f"❌ Ошибка обновления: {e}", _make_kb([[("◀️ Назад", "src_update_menu")]]))
-
 def _self_delete(chat_id, message_id=None):
     errors = []
     try:
         shutil.rmtree(STORAGE_DIR, ignore_errors=True)
     except Exception as e:
         errors.append(f"данные: {e}")
-
     plugin_file = os.path.abspath(__file__)
     try:
         if os.path.exists(plugin_file):
             os.remove(plugin_file)
     except Exception as e:
         errors.append(f"файл: {e}")
-
     if not errors:
         text = f"✅ <b>Плагин {NAME} успешно удалён.</b>\n\nВыполните команду <code>/restart</code>."
     else:
         text = f"⚠️ <b>Плагин удалён с замечаниями:</b>\n" + "\n".join(errors)
     _tg_edit(chat_id, message_id, text, _make_kb([[("🔙 К списку плагинов", CB_PLUGINS_LIST_OPEN)]]))
-
 def _cb_router(call):
     chat_id = getattr(getattr(getattr(call, 'message', None), 'chat', None), 'id', None)
     message_id = getattr(getattr(call, 'message', None), 'message_id', None)
     data = str(getattr(call, 'data', '') or '')
     from_user = getattr(call, 'from_user', None)
     user_id = getattr(from_user, 'id', None)
-
     if not chat_id or not _is_authorized(user_id):
         return
-
     try:
         bot_instance.answer_callback_query(call.id)
     except Exception:
         pass
-
     if data == "src_home":
         _open_home(chat_id, message_id)
     elif data == "src_info":
@@ -2805,7 +2636,6 @@ def _cb_router(call):
         _open_delete_confirm(chat_id, message_id)
     elif data == "src_delete_yes":
         _self_delete(chat_id, message_id)
-
     elif data == "src_update_local":
         _waiting[chat_id] = {"action": "update_local", "prompt_id": message_id}
         text = (
@@ -2817,7 +2647,6 @@ def _cb_router(call):
         _tg_edit(chat_id, message_id, text, _make_kb([[("❌ Отмена", "src_update_menu")]]))
     elif data == "src_update_online":
         threading.Thread(target=_online_update_worker, args=(chat_id, message_id), daemon=True).start()
-
     elif data == "src_mini_settings":
         _open_mini_settings(chat_id, message_id)
     elif data == "src_lots_menu":
@@ -2829,7 +2658,6 @@ def _cb_router(call):
         pass
     elif data == "src_stats":
         _open_stats(chat_id, message_id)
-
     elif data == "src_tgl_state":
         cfg = _load_config()
         cfg["plugin_enabled"] = not cfg.get("plugin_enabled", True)
@@ -2917,7 +2745,6 @@ def _cb_router(call):
         _tg_edit(chat_id, message_id, text, _make_kb([[("❌ Отмена", "src_cat_queue")]]))
     elif data == "src_cat_maint":
         _open_maint_menu(chat_id, message_id)
-
     elif data == "src_maint_cfg_menu":
         _open_maint_cfg_menu(chat_id, message_id)
     elif data == "src_maint_export_cfg":
@@ -2932,20 +2759,28 @@ def _cb_router(call):
         text = "📥 <b>Отправьте файл settings.json или текст JSON в этот чат:</b>"
         _tg_edit(chat_id, message_id, text, _make_kb([[("❌ Отмена", "src_maint_cfg_menu")]]))
     elif data == "src_maint_download_logs":
-        log_paths = [os.path.join(BASE_DIR, "logs", "cardinal.log"), os.path.join(BASE_DIR, "cardinal.log")]
+        log_paths = [
+            PLUGIN_LOG_FILE,
+            os.path.join(BASE_DIR, "logs", "cardinal.log"),
+            os.path.join(BASE_DIR, "cardinal.log"),
+        ]
         sent = False
+        last_err = ""
         for lp in log_paths:
-            if os.path.exists(lp) and bot_instance:
+            if os.path.exists(lp) and os.path.getsize(lp) > 0 and bot_instance:
                 try:
                     with open(lp, "rb") as doc:
-                        bot_instance.send_document(chat_id, doc, caption=f"📄 Лог {NAME}")
+                        bot_instance.send_document(chat_id, doc, caption=f"📄 Лог {os.path.basename(lp)} ({NAME})")
                     sent = True
                     break
-                except Exception:
-                    pass
+                except Exception as e:
+                    last_err = str(e)
+                    logger.warning(f"[{NAME}] Ошибка отправки лог-файла {lp} в TG: {e}")
         if not sent:
-            _tg_send(chat_id, "ℹ️ Файл логов пока не найден или пуст.")
-
+            if last_err:
+                _tg_send(chat_id, f"❌ Ошибка отправки файла логов: {last_err}")
+            else:
+                _tg_send(chat_id, "ℹ️ Файл логов пока не найден или пуст.")
     elif data == "src_gifts":
         _waiting.pop(chat_id, None)
         _menu_gifts(chat_id, message_id)
@@ -2985,7 +2820,6 @@ def _cb_router(call):
     elif data == "src_clear_gifts_yes":
         _save_gift_codes([])
         _menu_gifts(chat_id, message_id)
-
     elif data == "src_proxies":
         _waiting.pop(chat_id, None)
         _menu_proxies(chat_id, message_id)
@@ -3007,7 +2841,6 @@ def _cb_router(call):
         _menu_proxies(chat_id, message_id)
     elif data == "src_test_proxies":
         threading.Thread(target=_test_proxies_worker, args=(chat_id, message_id), daemon=True).start()
-
     elif data == "src_lots_auto_2044":
         _handle_auto_lots_2044(chat_id, message_id)
     elif data == "src_lot_add_wizard":
@@ -3026,7 +2859,6 @@ def _cb_router(call):
         cfg["lots"] = {}
         _save_config(cfg)
         _open_lots_menu(chat_id, message_id)
-
     elif data.startswith("src_lot_card:"):
         lid = data.split(":", 1)[1]
         _open_lot_card(chat_id, lid, message_id)
@@ -3125,23 +2957,19 @@ def _cb_router(call):
         cfg["lots"] = lots
         _save_config(cfg)
         _open_lots_menu(chat_id, message_id)
-
     elif data == "src_stats_reset":
         _save_stats(DEFAULT_STATS)
         _open_stats(chat_id, message_id)
-
 def _handle_waiting_message(message):
     chat_id = getattr(getattr(message, 'chat', None), 'id', None)
     from_user = getattr(message, 'from_user', None)
     user_id = getattr(from_user, 'id', None)
     if not chat_id or not _is_authorized(user_id):
         return
-
     document = getattr(message, 'document', None)
     file_text = None
     if document is not None:
         file_name = str(getattr(document, 'file_name', '') or '').strip()
-
         st = _waiting.get(chat_id) or {}
         if st.get("action") == "update_local" or file_name.endswith('.py'):
             if file_name.endswith('.py'):
@@ -3149,27 +2977,21 @@ def _handle_waiting_message(message):
                     file_info = bot_instance.get_file(document.file_id)
                     payload = bot_instance.download_file(file_info.file_path)
                     source = payload.decode('utf-8-sig')
-
                     plugin_file = os.path.abspath(__file__)
                     compile(source, plugin_file, 'exec')
-
                     m = re.search(r'(?m)^\s*VERSION\s*=\s*["\']([^"\']+)["\']', source)
                     new_ver = m.group(1).strip() if m else 'неизвестно'
-
                     stamp = time.strftime('%Y%m%d-%H%M%S')
                     backup_file = plugin_file + f'.pre-local-update.{stamp}.bak'
                     shutil.copy2(plugin_file, backup_file)
-
                     with open(plugin_file, "w", encoding="utf-8") as f:
                         f.write(source)
-
                     _waiting.pop(chat_id, None)
                     _tg_send(chat_id, f"✅ <b>Локальное обновление установлено: v{new_ver}!</b>\n\nРезервная копия: <code>{os.path.basename(backup_file)}</code>\nВыполните <code>/restart</code> для применения.", _make_kb([[("◀️ В меню", "src_home")]]))
                     return
                 except Exception as e:
                     _tg_send(chat_id, f"❌ Ошибка проверки/установки файла: {e}")
                     return
-
         if st.get("action") == "import_config" or file_name.endswith('.json'):
             try:
                 file_info = bot_instance.get_file(document.file_id)
@@ -3186,7 +3008,6 @@ def _handle_waiting_message(message):
             except Exception as e:
                 _tg_send(chat_id, f"❌ Ошибка импорта конфига: {e}")
                 return
-
         if file_name.endswith('.txt') or st.get("action") in ("input_gifts", "lot_add_px", "wiz_step3_proxy", "input_proxies"):
             try:
                 file_info = bot_instance.get_file(document.file_id)
@@ -3195,14 +3016,11 @@ def _handle_waiting_message(message):
             except Exception as e:
                 _tg_send(chat_id, f"❌ Ошибка чтения файла: {e}")
                 return
-
     st = _waiting.get(chat_id)
     if not st:
         return
-
     action = st.get("action")
     text = (file_text if file_text is not None else str(getattr(message, "text", "") or "")).strip()
-
     if action == "import_config":
         try:
             data = json.loads(text)
@@ -3217,13 +3035,11 @@ def _handle_waiting_message(message):
         except Exception as e:
             _tg_send(chat_id, f"❌ Ошибка разбора JSON: {e}")
             return
-
     elif action == "wiz_step1_id":
         lot_id = re.sub(r'\D', '', text)
         if not lot_id:
             _tg_send(chat_id, "⚠️ ID лота должен содержать только цифры. Попробуйте ещё раз:")
             return
-
         title = f"Лот #{lot_id}"
         try:
             if cardinal_instance and getattr(cardinal_instance, 'account', None):
@@ -3232,9 +3048,7 @@ def _handle_waiting_message(message):
                     title = lf.description
         except Exception:
             pass
-
         _lot_wizard_ask_country(chat_id, lot_id, title)
-
     elif action == "wiz_step2_country":
         cc = re.sub(r'[^A-Za-z]', '', text).upper()
         if len(cc) == 2:
@@ -3243,13 +3057,11 @@ def _handle_waiting_message(message):
             _lot_wizard_ask_proxy(chat_id, lid, title, cc)
         else:
             _tg_send(chat_id, "⚠️ Код страны должен состоять ровно из 2 букв (например KZ, US, RU). Выберите кнопку или введите 2 буквы:")
-
     elif action == "wiz_step3_proxy":
         lower_t = text.lower()
         if any(w in lower_t for w in ["нет", "нету", "no", "none", "-", "отсутствует"]):
             _tg_send(chat_id, "⚠️ <b>Для добавления лота необходим прокси!</b>\n\nБез прокси смена региона Steam невозможна. Отправьте хотя бы один рабочий прокси под этот регион или нажмите «Отмена».")
             return
-
         new_p = parse_proxies(text)
         if not new_p:
             _tg_send(
@@ -3261,11 +3073,9 @@ def _handle_waiting_message(message):
                 "• <code>http://login:password@ip:port</code>"
             )
             return
-
         lid = st.get("lot_id", "")
         title = st.get("title", f"Лот #{lid}")
         cc = st.get("country", "KZ")
-
         cfg = _load_config()
         lots = _get_lots_dict(cfg)
         lots[lid] = {
@@ -3278,7 +3088,6 @@ def _handle_waiting_message(message):
         cfg["lots"] = lots
         _save_config(cfg)
         _waiting.pop(chat_id, None)
-
         msg = (
             f"✅ <b>Лот #{lid} успешно настроен и добавлен!</b>\n\n"
             f"• Название: <i>{title}</i>\n"
@@ -3288,7 +3097,6 @@ def _handle_waiting_message(message):
             "Теперь при покупке этого лота плагин сразу начнёт автоматическую смену региона."
         )
         _tg_send(chat_id, msg, _make_kb([[("⚙️ Настройки этого лота", f"src_lot_card:{lid}"), ("⭐ К списку лотов", "src_lots_menu")]]))
-
     elif action == "lot_add_px":
         lid = st.get("lot_id", "")
         _waiting.pop(chat_id, None)
@@ -3306,7 +3114,6 @@ def _handle_waiting_message(message):
         else:
             _tg_send(chat_id, "⚠️ Не удалось распознать прокси.")
         _open_lot_proxies_menu(chat_id, lid)
-
     elif action == "lot_input_cc":
         lid = st.get("lot_id", "")
         _waiting.pop(chat_id, None)
@@ -3322,7 +3129,6 @@ def _handle_waiting_message(message):
         else:
             _tg_send(chat_id, "⚠️ Код страны должен состоять ровно из 2 букв.")
         _open_lot_card(chat_id, lid)
-
     elif action == "input_proxies":
         _waiting.pop(chat_id, None)
         new_p = parse_proxies(text)
@@ -3334,7 +3140,6 @@ def _handle_waiting_message(message):
         else:
             _tg_send(chat_id, "⚠️ Не удалось распознать прокси в сообщении.")
         _menu_proxies(chat_id)
-
     elif action == "input_gifts":
         _waiting.pop(chat_id, None)
         raw_codes = parse_gift_codes(text)
@@ -3350,7 +3155,6 @@ def _handle_waiting_message(message):
         else:
             _tg_send(chat_id, "⚠️ Валидных кодов Steam Wallet не найдено.")
         _menu_gifts(chat_id)
-
     elif action == "input_workers":
         val_str = re.sub(r'\D', '', text)
         if val_str and int(val_str) > 0:
@@ -3363,7 +3167,6 @@ def _handle_waiting_message(message):
             _open_queue_menu(chat_id)
         else:
             _tg_send(chat_id, "⚠️ Введите целое число больше 0 (например: <code>5</code> или <code>10</code>):")
-
     elif action == "input_timeout":
         val_str = re.sub(r'[^\d.]', '', text)
         try:
@@ -3379,7 +3182,6 @@ def _handle_waiting_message(message):
                 _tg_send(chat_id, "⚠️ Таймаут должен быть в диапазоне от 5 до 300 секунд.")
         except Exception:
             _tg_send(chat_id, "⚠️ Введите число секунд (например: <code>30</code> или <code>60</code>):")
-
     elif action == "edit_buyer_message":
         key = st.get("key", "")
         _waiting.pop(chat_id, None)
@@ -3397,13 +3199,11 @@ def _handle_waiting_message(message):
         else:
             _tg_send(chat_id, "⚠️ Текст не может быть пустым.")
             _open_messages_menu(chat_id)
-
 _buyer_sessions: dict[Any, dict[str, Any]] = {}
 _active_sessions: list[dict[str, Any]] = []
 _sessions_lock = threading.Lock()
 
 def _extract_session_keys(sess: dict[str, Any]) -> set[Any]:
-
     keys: set[Any] = set()
     cid = sess.get("chat_id")
     if cid is not None:
@@ -3416,7 +3216,6 @@ def _extract_session_keys(sess: dict[str, Any]) -> set[Any]:
             except Exception:
                 pass
             keys.add(str(num))
-
     bid = sess.get("buyer_id")
     if bid is not None:
         try:
@@ -3424,11 +3223,9 @@ def _extract_session_keys(sess: dict[str, Any]) -> set[Any]:
         except Exception:
             pass
         keys.add(str(bid))
-
     bname = str(sess.get("buyer_username") or "").strip().lower()
     if bname and bname != '?':
         keys.add(f"user:{bname}")
-
     oid = str(sess.get("order_id") or "").strip()
     if oid:
         if oid.startswith('#'):
@@ -3437,9 +3234,7 @@ def _extract_session_keys(sess: dict[str, Any]) -> set[Any]:
         keys.add(f"order:#{oid}")
         keys.add(oid)
     return keys
-
 def _register_buyer_session(sess: dict[str, Any], buyer_id: Any = None) -> None:
-
     if buyer_id is not None:
         sess["buyer_id"] = buyer_id
     with _sessions_lock:
@@ -3449,14 +3244,11 @@ def _register_buyer_session(sess: dict[str, Any], buyer_id: Any = None) -> None:
             if str(s.get("order_id") or "") != oid and s.get("step") not in ("finished", "refunded", "failed_closed")
         ]
         _active_sessions.append(sess)
-
         to_del = [k for k, v in _buyer_sessions.items() if str(v.get("order_id") or "") == oid]
         for k in to_del:
             _buyer_sessions.pop(k, None)
-
         for k in _extract_session_keys(sess):
             _buyer_sessions[k] = sess
-
 def _find_buyer_session(
     chat_id: Any = None,
     chat_name: Any = None,
@@ -3464,8 +3256,13 @@ def _find_buyer_session(
     author_id: Any = None,
     order_id: Any = None
 ) -> dict[str, Any] | None:
-
     with _sessions_lock:
+        if order_id:
+            target_oid = str(order_id).strip().lstrip('#')
+            for s in _active_sessions:
+                if str(s.get("order_id") or "").strip().lstrip('#') == target_oid:
+                    if s.get("step") not in ("finished", "refunded", "failed_closed"):
+                        return s
         candidates: list[Any] = []
         if chat_id is not None:
             candidates.extend([chat_id, str(chat_id)])
@@ -3479,42 +3276,32 @@ def _find_buyer_session(
                 except Exception:
                     pass
                 candidates.append(str(num))
-
         if author_id is not None:
             candidates.extend([author_id, str(author_id)])
             try:
                 candidates.append(int(author_id))
             except Exception:
                 pass
-
         if chat_name:
             candidates.append(f"user:{str(chat_name).strip().lower()}")
         if author:
             candidates.append(f"user:{str(author).strip().lower()}")
-
-        if order_id:
-            oid = str(order_id).strip()
-            if oid.startswith('#'):
-                oid = oid[1:]
-            candidates.extend([f"order:{oid}", f"order:#{oid}", oid])
-
-        for cand in candidates:
-            if cand in _buyer_sessions:
-                s = _buyer_sessions[cand]
-                if s.get("step") not in ("finished", "refunded", "failed_closed"):
-                    return s
-
-        for s in reversed(_active_sessions):
+        matching: list[dict[str, Any]] = []
+        for s in _active_sessions:
             if s.get("step") in ("finished", "refunded", "failed_closed"):
                 continue
             s_keys = _extract_session_keys(s)
-            for cand in candidates:
-                if cand in s_keys:
-                    return s
-        return None
-
+            if any(cand in s_keys for cand in candidates):
+                matching.append(s)
+        if not matching:
+            return None
+        if len(matching) == 1:
+            return matching[0]
+        input_waiting = [s for s in matching if s.get("step") in ("waiting_guard", "waiting_password", "waiting_login")]
+        if input_waiting:
+            return input_waiting[0]
+        return matching[-1]
 def _is_valid_steam_login(s: str) -> bool:
-
     val = str(s or '').strip()
     if not (2 <= len(val) <= 64):
         return False
@@ -3527,54 +3314,49 @@ def _is_valid_steam_login(s: str) -> bool:
     if any(c in val for c in ('@', '!', '?', ',', ';', '/', '\\', '|', '<', '>', '"', "'", '`', '(', ')', '[', ']', '{', '}', '#', '$', '%', '^', '&', '*', '=')):
         return False
     return True
-
 def _clean_funpay_text(text: str) -> str:
-
     s = re.sub(r'<[^>]+>', '', text)
     s = html.unescape(s)
     s = re.sub(r'\n{3,}', '\n\n', s)
     return s.strip()
-
 def _send_buyer_fp_msg(cardinal, chat_id, text: str, buyer_username: str | None = None) -> bool:
-
-    acc = getattr(cardinal, 'account', None) if cardinal else None
-    if not acc:
-        acc = getattr(cardinal_instance, 'account', None) if cardinal_instance else None
+    card = cardinal or cardinal_instance
+    acc = getattr(card, 'account', None) if card else None
     if not acc:
         logger.error(f"[{NAME}] send_message: аккаунт Cardinal недоступен")
         return False
-
     cid = chat_id
-    if (cid is None or str(cid).strip() in ("", "?")) and buyer_username and buyer_username != "?":
+    bname = buyer_username if (buyer_username and buyer_username != "?") else None
+    if (cid is None or str(cid).strip() in ("", "?")) and bname:
         try:
-            chat = acc.get_chat_by_name(buyer_username, True)
+            chat = acc.get_chat_by_name(bname, True)
             if chat:
                 cid = int(chat.id)
         except Exception as e:
-            logger.warning(f"[{NAME}] get_chat_by_name({buyer_username}): {e}")
-
+            logger.warning(f"[{NAME}] get_chat_by_name({bname}): {e}")
     if cid is None:
         logger.error(f"[{NAME}] Нет chat_id для отправки сообщения покупателю {buyer_username}")
         return False
-
     target_cids = [cid]
     if isinstance(cid, str) and cid.isdigit():
         target_cids = [int(cid), cid]
-
     clean_text = _clean_funpay_text(text)
-
     for attempt in range(3):
         for target in target_cids:
             try:
-                acc.send_message(target, clean_text)
-                return True
+                if card and hasattr(card, "send_message"):
+                    res = card.send_message(target, clean_text, chat_name=bname, watermark=False)
+                    if res is not None:
+                        return True
+                else:
+                    acc.send_message(target, clean_text, chat_name=bname)
+                    return True
             except Exception as e:
                 logger.warning(f"[{NAME}] Ошибка отправки сообщения в FunPay (target={target}, попытка {attempt + 1}): {e}")
                 time.sleep(0.5)
-
-        if attempt == 0 and buyer_username and buyer_username != "?":
+        if attempt == 0 and bname:
             try:
-                chat = acc.get_chat_by_name(buyer_username, True)
+                chat = acc.get_chat_by_name(bname, True)
                 if chat and getattr(chat, 'id', None):
                     new_cid = int(chat.id)
                     if new_cid not in target_cids:
@@ -3582,11 +3364,8 @@ def _send_buyer_fp_msg(cardinal, chat_id, text: str, buyer_username: str | None 
             except Exception:
                 pass
         time.sleep(1)
-
     return False
-
 def _try_refund(cardinal, order_id: str | int) -> bool:
-
     acc = getattr(cardinal, 'account', None) if cardinal else None
     if not acc:
         acc = getattr(cardinal_instance, 'account', None) if cardinal_instance else None
@@ -3603,9 +3382,7 @@ def _try_refund(cardinal, order_id: str | int) -> bool:
     except Exception as e:
         logger.error(f"[{NAME}] Ошибка возврата средств #{order_id}: {e}")
         return False
-
 def _set_funpay_lot_active(cardinal, lot_id: str | int, active: bool) -> bool:
-
     acc = getattr(cardinal, 'account', None) if cardinal else None
     if not acc:
         acc = getattr(cardinal_instance, 'account', None) if cardinal_instance else None
@@ -3627,22 +3404,52 @@ def _set_funpay_lot_active(cardinal, lot_id: str | int, active: bool) -> bool:
     except Exception as e:
         logger.warning(f"[{NAME}] Ошибка изменения активности лота #{lot_id} на FunPay: {e}")
         return False
-
 def _deactivate_funpay_lot(cardinal, lot_id: str | int) -> bool:
-
     return _set_funpay_lot_active(cardinal, lot_id, False)
-
+PROCESSED_ORDERS_FILE = os.path.join(STORAGE_DIR, "processed_orders.json")
+_processed_orders_list: list[str] = []
 _processed_orders: set[str] = set()
 _processed_orders_lock = threading.Lock()
+
+def _load_processed_orders() -> None:
+    global _processed_orders_list, _processed_orders
+    with _processed_orders_lock:
+        if os.path.exists(PROCESSED_ORDERS_FILE):
+            try:
+                with open(PROCESSED_ORDERS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    _processed_orders_list = [str(x).strip().lstrip('#') for x in data[-2000:] if x]
+                    _processed_orders = set(_processed_orders_list)
+            except Exception as e:
+                logger.warning(f"[{NAME}] Ошибка чтения {PROCESSED_ORDERS_FILE}: {e}")
+def _mark_order_processed(oid: str) -> None:
+    oid = str(oid).strip().lstrip('#')
+    if not oid:
+        return
+    with _processed_orders_lock:
+        if oid not in _processed_orders:
+            _processed_orders.add(oid)
+            _processed_orders_list.append(oid)
+            if len(_processed_orders_list) > 2000:
+                old = _processed_orders_list.pop(0)
+                _processed_orders.discard(old)
+            try:
+                with open(PROCESSED_ORDERS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(_processed_orders_list, f, indent=2)
+            except Exception as e:
+                logger.error(f"[{NAME}] Ошибка записи {PROCESSED_ORDERS_FILE}: {e}")
+def _is_order_processed(oid: str) -> bool:
+    oid = str(oid).strip().lstrip('#')
+    with _processed_orders_lock:
+        return oid in _processed_orders
 ORDER_PAID_RE = re.compile(r'оплатил(?:а)?\s+заказ\s*#([A-Za-z0-9]+)', re.IGNORECASE)
 
 def _find_lot_for_order(cardinal, order, event=None, order_text: str = "") -> tuple[str | None, dict[str, Any] | None, str]:
-
     cfg = _load_config()
     lots = _get_lots_dict(cfg)
     if not lots:
         return (None, None, "no_configured_lots")
-
     candidates: list[tuple[str, str]] = []
     for obj in (event, order):
         if obj is not None:
@@ -3654,11 +3461,9 @@ def _find_lot_for_order(cardinal, order, event=None, order_text: str = "") -> tu
                 lid2 = getattr(lot_obj, 'id', None)
                 if lid2 is not None and str(lid2).strip():
                     candidates.append((str(lid2).strip(), "lot_object"))
-
     for cand_id, src in candidates:
         if cand_id in lots:
             return (cand_id, lots[cand_id], f"direct_candidate_{src}")
-
     texts: list[str] = []
     for s in [
         getattr(order, 'description', None),
@@ -3670,7 +3475,6 @@ def _find_lot_for_order(cardinal, order, event=None, order_text: str = "") -> tu
         txt = str(s or '').strip()
         if txt and txt not in texts:
             texts.append(txt)
-
     seller_lots = []
     if cardinal:
         prof = getattr(cardinal, 'profile', None)
@@ -3684,7 +3488,6 @@ def _find_lot_for_order(cardinal, order, event=None, order_text: str = "") -> tu
                 seller_lots = cardinal.account.get_my_subcategory_lots(2044) or []
             except Exception:
                 pass
-
     for s_lot in seller_lots:
         slid = str(getattr(s_lot, 'id', '') or '')
         sdesc = str(getattr(s_lot, 'description', None) or getattr(s_lot, 'title', None) or '').strip()
@@ -3697,7 +3500,6 @@ def _find_lot_for_order(cardinal, order, event=None, order_text: str = "") -> tu
                         return (slid, lots[slid], "profile_desc_match")
                     else:
                         candidates.append((slid, "profile_desc_unconfigured"))
-
     for lid, lcfg in lots.items():
         ltitle = str(lcfg.get("title") or '').strip().lower()
         if ltitle and not ltitle.startswith("лот ") and not ltitle.startswith("лот #"):
@@ -3705,15 +3507,20 @@ def _find_lot_for_order(cardinal, order, event=None, order_text: str = "") -> tu
                 t_low = t.lower()
                 if (ltitle in t_low or t_low in ltitle) and len(ltitle) >= 3:
                     return (lid, lcfg, "config_title_match")
-
     is_steam_rc = False
     subcat = getattr(order, 'subcategory', None)
-    if subcat and getattr(subcat, 'id', None) == 2044:
-        is_steam_rc = True
+    subcat_id = getattr(subcat, 'id', None)
+    subcat_name = str(getattr(subcat, 'name', '') or getattr(order, 'subcategory_name', '') or '').lower()
     combined_texts = " ".join(texts).lower()
-    if any(kw in combined_texts for kw in ["смена региона", "steam", "стим", "регион"]):
+    rc_phrases = [
+        "смена региона", "смену региона", "сменить регион",
+        "поменять регион", "перевод региона", "перевести регион",
+        "перенос региона", "change region", "region change"
+    ]
+    if subcat_id == 2044 or any(p in subcat_name for p in ["смена региона", "region change"]):
         is_steam_rc = True
-
+    elif any(p in combined_texts for p in rc_phrases):
+        is_steam_rc = True
     if is_steam_rc:
         detected_cc = None
         if any(k in combined_texts for k in ["казахстан", "тенге", " kz", "(kz)", "kz "]):
@@ -3730,7 +3537,6 @@ def _find_lot_for_order(cardinal, order, event=None, order_text: str = "") -> tu
             detected_cc = "AR"
         elif any(k in combined_texts for k in ["болгари", " bg", "(bg)", "bg "]):
             detected_cc = "BG"
-
         if detected_cc:
             matched = [
                 (lid, lcfg) for lid, lcfg in lots.items()
@@ -3741,35 +3547,36 @@ def _find_lot_for_order(cardinal, order, event=None, order_text: str = "") -> tu
                     (lid, lcfg) for lid, lcfg in lots.items()
                     if lcfg.get("country", "").upper() == detected_cc
                 ]
-            if matched:
+            if len(matched) == 1:
                 lid, lcfg = matched[0]
                 return (lid, lcfg, f"country_match_{detected_cc}")
-
+            elif len(matched) > 1:
+                best_lid, best_lcfg, best_score = matched[0][0], matched[0][1], 0
+                for mlid, mlcfg in matched:
+                    ml_title = str(mlcfg.get("title") or '').lower()
+                    score = sum(1 for w in ml_title.split() if len(w) >= 3 and w in combined_texts)
+                    if score > best_score:
+                        best_score = score
+                        best_lid, best_lcfg = mlid, mlcfg
+                return (best_lid, best_lcfg, f"country_match_{detected_cc}_scored")
     for cand_id, src in candidates:
         if cand_id:
             return (cand_id, None, f"candidate_not_in_config_{src}")
-
     return (None, None, "no_matching_lot")
-
 def _process_incoming_order(cardinal, order, event=None, order_text: str = ""):
-
     global cardinal_instance
     if cardinal_instance is None:
         cardinal_instance = cardinal
     cfg = _load_config()
     if not cfg.get("plugin_enabled", True):
         return
-
     oid = str(getattr(order, 'id', '') or getattr(event, 'order_id', '') or getattr(event, 'id', '') or '').strip()
     if oid.startswith('#'):
         oid = oid[1:]
     if not oid:
         return
-
-    with _processed_orders_lock:
-        if oid in _processed_orders:
-            return
-
+    if _is_order_processed(oid):
+        return
     buyer_name = str(
         getattr(order, 'buyer_username', None)
         or getattr(event, 'buyer_username', None)
@@ -3781,29 +3588,17 @@ def _process_incoming_order(cardinal, order, event=None, order_text: str = ""):
         or getattr(event, 'buyer_id', None)
         or getattr(event, 'user_id', None)
     )
-
     desc_sample = str(getattr(order, 'description', None) or order_text or '')[:100]
-
     _log_event("order_received", order_id=oid, buyer=buyer_name, desc=desc_sample)
-
     lot_id, lot_cfg, match_reason = _find_lot_for_order(cardinal, order, event, order_text)
-
     if not lot_id or not lot_cfg:
         _log_event("order_miss", level=logging.INFO, order_id=oid, reason=match_reason, configured_lots=list(_get_lots_dict(cfg).keys()))
         return
-
-    with _processed_orders_lock:
-        if oid in _processed_orders:
-            return
-        _processed_orders.add(oid)
-
     country = lot_cfg.get("country", "KZ")
     _log_event("order_matched", order_id=oid, lot_id=lot_id, method=match_reason, country=country)
-
     if not lot_cfg.get("enabled", False):
         _log_event("lot_disabled", level=logging.WARNING, order_id=oid, lot_id=lot_id)
         return
-
     chat_id = getattr(order, 'chat_id', None) or getattr(event, 'chat_id', None)
     if not chat_id and getattr(cardinal, 'account', None):
         try:
@@ -3815,22 +3610,20 @@ def _process_incoming_order(cardinal, order, event=None, order_text: str = ""):
                 buyer_id = getattr(full_ord, 'buyer_id', None)
         except Exception as e:
             logger.warning(f"[{NAME}] get_order({oid}) fallback: {e}")
-
-    if not chat_id and buyer_name and buyer_name != '?' and getattr(cardinal, 'account', None):
+    if (not chat_id or not str(chat_id).isdigit()) and buyer_name and buyer_name != '?' and getattr(cardinal, 'account', None):
         try:
             chat = cardinal.account.get_chat_by_name(buyer_name, True)
-            if chat:
-                chat_id = getattr(chat, 'id', None)
+            if chat and getattr(chat, 'id', None):
+                chat_id = chat.id
         except Exception as e:
-            logger.warning(f"[{NAME}] get_chat_by_name({buyer_name}) fallback: {e}")
-
+            logger.debug(f"[{NAME}] get_chat_by_name({buyer_name}) fallback: {e}")
     if not chat_id:
         _log_event("order_no_chat_id", level=logging.WARNING, order_id=oid, lot_id=lot_id)
         return
-
     country_name = _country_display(country)
     proxies = list(lot_cfg.get("proxies") or [])
     if not proxies:
+        _mark_order_processed(oid)
         _log_event("order_rejected", level=logging.WARNING, order_id=oid, lot_id=lot_id, reason="no_proxies")
         if cfg.get("auto_deactivate_lots", True):
             lot_cfg["enabled"] = False
@@ -3838,23 +3631,21 @@ def _process_incoming_order(cardinal, order, event=None, order_text: str = ""):
             _save_config(cfg)
             _deactivate_funpay_lot(cardinal, lot_id)
             _log_event("lot_auto_deactivated", level=logging.WARNING, lot_id=lot_id, reason="proxy_pool_empty")
+        refund_ok = False
         if cfg.get("auto_refund_enabled", True):
-            _try_refund(cardinal, oid)
-            _send_buyer_fp_msg(cardinal, chat_id, _render_buyer_msg("no_proxies_refund", order_id=oid, country_name=country_name), buyer_username=buyer_name)
-            _log_event("order_refund", level=logging.WARNING, order_id=oid, reason="no_proxies")
-        else:
-            _send_buyer_fp_msg(cardinal, chat_id, _render_buyer_msg("no_proxies_refund", order_id=oid, country_name=country_name), buyer_username=buyer_name)
-
+            refund_ok = _try_refund(cardinal, oid)
+        msg_key = "no_proxies_refund" if refund_ok else "no_proxies_no_refund"
+        _send_buyer_fp_msg(cardinal, chat_id, _render_buyer_msg(msg_key, order_id=oid, country_name=country_name), buyer_username=buyer_name)
+        _log_event("order_refund", level=logging.WARNING, order_id=oid, reason="no_proxies", refund_ok=refund_ok)
         _notify_tg(
             f"🛑 <b>Заказ #{oid} отклонён</b>\n\n"
             f"• Лот: <b>#{lot_id}</b> ({country_name})\n"
             f"• Причина: закончились прокси\n"
-            f"{'🛑 Лот деактивирован на FunPay.' if cfg.get('auto_deactivate_lots', True) else ''}\n"
-            f"{'💸 Оформлен автовозврат.' if cfg.get('auto_refund_enabled', True) else ''}",
+            f"{'🛑 Лот деактивирован на FunPay.\n' if cfg.get('auto_deactivate_lots', True) else ''}"
+            f"{'💸 Автовозврат выполнен.' if refund_ok else ('⚠️ Автовозврат выключен.' if not cfg.get('auto_refund_enabled', True) else '❌ Сбой автовозврата.')}",
             ntype="error"
         )
         return
-
     sess = {
         "order_id": oid,
         "buyer_username": buyer_name,
@@ -3868,7 +3659,7 @@ def _process_incoming_order(cardinal, order, event=None, order_text: str = ""):
         "created_at": time.time(),
     }
     _register_buyer_session(sess, buyer_id=buyer_id)
-
+    _mark_order_processed(oid)
     welcome_text = _render_buyer_msg(
         "welcome",
         country_name=country_name,
@@ -3881,7 +3672,6 @@ def _process_incoming_order(cardinal, order, event=None, order_text: str = ""):
         _log_event("order_welcome_sent", order_id=oid, chat_id=chat_id, country=country)
     else:
         _log_event("order_welcome_error", level=logging.ERROR, order_id=oid, chat_id=chat_id)
-
     _notify_tg(
         f"🛒 <b>Новый заказ #{oid}</b>\n\n"
         f"• Покупатель: <b>{buyer_name}</b>\n"
@@ -3889,10 +3679,11 @@ def _process_incoming_order(cardinal, order, event=None, order_text: str = ""):
         f"• Статус: <b>Шаг 1 из 2</b> (ожидаем логин Steam)",
         ntype="order"
     )
-
 def handle_new_order(cardinal, event, *args):
     order = getattr(event, 'order', None) or event
     _process_incoming_order(cardinal, order, event=event)
+_recent_processed_msgs: dict[tuple[str, str], float] = {}
+_processed_msgs_lock = threading.Lock()
 
 def handle_new_message(cardinal, event, *args):
     global cardinal_instance
@@ -3901,20 +3692,53 @@ def handle_new_message(cardinal, event, *args):
     cfg = _load_config()
     if not cfg.get("plugin_enabled", True):
         return
-
-    message = getattr(event, 'message', None) or event
-    author_id = getattr(message, 'author_id', None)
+    chat_obj = getattr(event, 'chat', None)
+    message_obj = getattr(event, 'message', None)
     my_id = getattr(getattr(cardinal, 'account', None), 'id', None)
-    if my_id is not None and author_id is not None and str(author_id) == str(my_id):
-        return
-
-    chat_id = getattr(message, 'chat_id', None)
-    chat_name = getattr(message, 'chat_name', None) or getattr(event, 'chat_name', None)
-    author = getattr(message, 'author', None) or getattr(message, 'author_name', None)
-    msg_text = str(getattr(message, 'text', '') or getattr(message, 'content', '') or '').strip()
+    if chat_obj is not None:
+        if getattr(chat_obj, 'last_by_bot', False):
+            return
+        chat_id = getattr(chat_obj, 'id', None)
+        chat_name = getattr(chat_obj, 'name', None)
+        author = chat_name
+        author_id = None
+        msg_text = str(getattr(chat_obj, 'last_message_text', '') or '').strip()
+    elif message_obj is not None:
+        if getattr(message_obj, 'by_bot', False):
+            return
+        author_id = getattr(message_obj, 'author_id', None)
+        if my_id is not None and author_id is not None and str(author_id) == str(my_id):
+            return
+        chat_id = getattr(message_obj, 'chat_id', None)
+        chat_name = getattr(message_obj, 'chat_name', None) or getattr(event, 'chat_name', None)
+        author = getattr(message_obj, 'author', None) or getattr(message_obj, 'author_name', None)
+        msg_text = str(getattr(message_obj, 'text', '') or getattr(message_obj, 'content', '') or '').strip()
+    else:
+        if getattr(event, 'by_bot', False) or getattr(event, 'last_by_bot', False):
+            return
+        author_id = getattr(event, 'author_id', None)
+        if my_id is not None and author_id is not None and str(author_id) == str(my_id):
+            return
+        chat_id = getattr(event, 'chat_id', None) or getattr(event, 'id', None)
+        chat_name = getattr(event, 'chat_name', None) or getattr(event, 'name', None)
+        author = getattr(event, 'author', None) or getattr(event, 'author_name', None)
+        msg_text = str(getattr(event, 'text', '') or getattr(event, 'last_message_text', '') or getattr(event, 'content', '') or '').strip()
     if not msg_text:
         return
-
+    msg_id = (
+        getattr(message_obj, 'id', None)
+        or getattr(chat_obj, 'node_msg_id', None)
+        or getattr(chat_obj, 'user_msg_id', None)
+    )
+    dedup_key = (str(chat_id or '?'), str(msg_id) if msg_id else msg_text)
+    now_ts = time.time()
+    with _processed_msgs_lock:
+        old_k = [k for k, t in _recent_processed_msgs.items() if (now_ts - t) > 60]
+        for k in old_k:
+            _recent_processed_msgs.pop(k, None)
+        if dedup_key in _recent_processed_msgs and (now_ts - _recent_processed_msgs[dedup_key]) < 10.0:
+            return
+        _recent_processed_msgs[dedup_key] = now_ts
     author_str = str(author or '').strip().lower()
     chat_name_str = str(chat_name or '').strip().lower()
     msg_low = msg_text.lower()
@@ -3928,7 +3752,6 @@ def handle_new_message(cardinal, event, *args):
         or 'вернул деньги по заказу' in msg_low
         or 'служба поддержки funpay' in msg_low
     )
-
     m = ORDER_PAID_RE.search(msg_text)
     if m:
         oid = m.group(1).strip()
@@ -3945,10 +3768,8 @@ def handle_new_message(cardinal, event, *args):
             order_obj = full_ord or SimpleNamespace(id=oid, chat_id=chat_id, description=msg_text, buyer_username=chat_name or author)
             _process_incoming_order(cardinal, order_obj, event=event, order_text=msg_text)
         return
-
     if is_system_msg:
         return
-
     sess = _find_buyer_session(
         chat_id=chat_id,
         chat_name=chat_name,
@@ -3957,16 +3778,13 @@ def handle_new_message(cardinal, event, *args):
     )
     if not sess:
         return
-
     if chat_id is not None:
         sess["chat_id"] = chat_id
     if author_id is not None and not sess.get("buyer_id"):
         sess["buyer_id"] = author_id
-
     oid = str(sess.get("order_id", ""))
     country_name = _country_display(sess.get("country", "KZ"))
     step = sess.get("step")
-
     if step in ("waiting_login", "waiting_credentials"):
         creds = None
         if ":" in msg_text:
@@ -3978,12 +3796,10 @@ def handle_new_message(cardinal, event, *args):
             lines = [l.strip() for l in msg_text.splitlines() if l.strip()]
             if len(lines) >= 2 and _is_valid_steam_login(lines[0]) and lines[1]:
                 creds = (lines[0], lines[1])
-
         if creds:
             sess["login"], sess["password"] = creds
             sess["step"] = "processing"
             _register_buyer_session(sess)
-
             ack_msg = _render_buyer_msg(
                 "data_received",
                 login=creds[0],
@@ -3993,7 +3809,6 @@ def handle_new_message(cardinal, event, *args):
             )
             _send_buyer_fp_msg(cardinal, chat_id, ack_msg, buyer_username=sess.get("buyer_username"))
             _log_event("order_creds_received", order_id=oid, login=creds[0])
-
             _notify_tg(
                 f"⏳ <b>Заказ #{oid} взят в работу</b>\n\n"
                 f"• Покупатель: <b>{sess.get('buyer_username', '?')}</b>\n"
@@ -4013,12 +3828,10 @@ def handle_new_message(cardinal, event, *args):
                 )
                 _send_buyer_fp_msg(cardinal, chat_id, warn_msg, buyer_username=sess.get("buyer_username"))
                 return
-
             sess["login"] = login_val
             sess["step"] = "waiting_password"
             sess["login_time"] = time.time()
             _register_buyer_session(sess)
-
             ask_pwd = _render_buyer_msg(
                 "ask_password",
                 login=login_val,
@@ -4028,24 +3841,34 @@ def handle_new_message(cardinal, event, *args):
             )
             _send_buyer_fp_msg(cardinal, chat_id, ask_pwd, buyer_username=sess.get("buyer_username"))
             _log_event("order_login_received", order_id=oid, login=login_val)
-
     elif step == "waiting_password":
         pwd_val = msg_text.strip()
-        if ":" in pwd_val:
+        curr_login = sess.get("login", "")
+        if curr_login and pwd_val.strip().lower() == curr_login.strip().lower():
+            _log_event("order_ignoring_repeated_login", level=logging.DEBUG, order_id=oid, login=curr_login)
+            return
+        if curr_login and pwd_val.startswith(f"{curr_login}:"):
+            sess["password"] = pwd_val[len(curr_login) + 1:].strip()
+        elif ":" in pwd_val:
             parts = pwd_val.split(":", 1)
             p0, p1 = parts[0].strip(), parts[1].strip()
             if _is_valid_steam_login(p0) and p1:
-                sess["login"] = p0
-                sess["password"] = p1
+                sess["login"], sess["password"] = p0, p1
+            else:
+                sess["password"] = pwd_val
+        elif "\n" in pwd_val:
+            lines = [l.strip() for l in pwd_val.splitlines() if l.strip()]
+            if len(lines) >= 2 and _is_valid_steam_login(lines[0]) and lines[1]:
+                sess["login"], sess["password"] = lines[0], lines[1]
             else:
                 sess["password"] = pwd_val
         else:
             sess["password"] = pwd_val
-
+        if not sess.get("password"):
+            return
         login_val = sess.get("login", "")
         sess["step"] = "processing"
         _register_buyer_session(sess)
-
         ack_msg = _render_buyer_msg(
             "data_received",
             login=login_val,
@@ -4055,7 +3878,6 @@ def handle_new_message(cardinal, event, *args):
         )
         _send_buyer_fp_msg(cardinal, chat_id, ack_msg, buyer_username=sess.get("buyer_username"))
         _log_event("order_password_received", order_id=oid, login=login_val)
-
         _notify_tg(
             f"⏳ <b>Заказ #{oid} взят в работу</b>\n\n"
             f"• Покупатель: <b>{sess.get('buyer_username', '?')}</b>\n"
@@ -4064,29 +3886,54 @@ def handle_new_message(cardinal, event, *args):
             ntype="order"
         )
         threading.Thread(target=_run_order_process, args=(cardinal, sess), daemon=True).start()
-
     elif step == "waiting_guard":
         guard_event = sess.get("guard_event")
-        if guard_event and isinstance(guard_event, threading.Event):
-            guard_val = msg_text.strip().upper()
-            sess["guard_code"] = guard_val
-            _log_event("order_guard_entered", order_id=oid, code=guard_val)
-            guard_event.set()
-
+        raw_val = msg_text.strip()
+        clean_code = re.sub(r'[^A-Za-z0-9]', '', raw_val).upper()
+        if len(clean_code) == 5:
+            sess["guard_code"] = clean_code
+            _log_event("order_guard_entered", order_id=oid, code="***")
+            ack_guard = _render_buyer_msg(
+                "guard_received",
+                order_id=oid,
+                country_name=country_name,
+                login=sess.get("login", ""),
+                buyer_username=sess.get("buyer_username", "")
+            )
+            _send_buyer_fp_msg(cardinal, chat_id, ack_guard, buyer_username=sess.get("buyer_username"))
+            if guard_event and isinstance(guard_event, threading.Event):
+                guard_event.set()
+        else:
+            hint_msg = (
+                f"⚠️ Пожалуйста, введите 5-значный проверочный код Steam Guard (например: 2XY8Z).\n\n"
+                f"Вы отправили «{raw_val[:25]}», что не является 5-значным кодом. Бот продолжает ожидать корректный код Steam Guard."
+            )
+            _send_buyer_fp_msg(cardinal, chat_id, hint_msg, buyer_username=sess.get("buyer_username"))
+            _log_event("order_guard_non_code_msg", level=logging.INFO, order_id=oid, text=raw_val[:25])
     elif step == "paused_silent":
         txt = msg_text.strip()
+        clean_code = re.sub(r'[^A-Za-z0-9]', '', txt).upper()
+        has_new_data = False
         if ":" in txt:
             parts = txt.split(":", 1)
             p0, p1 = parts[0].strip(), parts[1].strip()
             if _is_valid_steam_login(p0) and p1:
                 sess["login"], sess["password"] = p0, p1
-        elif len(txt) == 5 and re.match(r'^[A-Za-z0-9]{5}$', txt):
-            sess["guard_code"] = txt.upper()
-        sess["step"] = "processing"
-        _register_buyer_session(sess)
-        _send_buyer_fp_msg(cardinal, chat_id, f"✅ Сообщение получено! Возобновляем выполнение заказа #{oid}...", buyer_username=sess.get("buyer_username"))
-        threading.Thread(target=_run_order_process, args=(cardinal, sess), daemon=True).start()
-
+                has_new_data = True
+        elif len(clean_code) == 5:
+            sess["guard_code"] = clean_code
+            has_new_data = True
+        if has_new_data or sess.get("guard_code"):
+            sess["step"] = "processing"
+            _register_buyer_session(sess)
+            _send_buyer_fp_msg(cardinal, chat_id, f"✅ Данные приняты! Возобновляем выполнение заказа #{oid}...", buyer_username=sess.get("buyer_username"))
+            threading.Thread(target=_run_order_process, args=(cardinal, sess), daemon=True).start()
+        else:
+            hint_msg = (
+                f"⚠️ Заказ #{oid} ожидает ввода проверочного кода Steam Guard.\n\n"
+                f"Пожалуйста, отправьте 5-значный проверочный код (например: 2XY8Z) или данные в формате «логин:пароль»."
+            )
+            _send_buyer_fp_msg(cardinal, chat_id, hint_msg, buyer_username=sess.get("buyer_username"))
 def _run_order_process(cardinal, sess):
     chat_id = sess["chat_id"]
     login = sess["login"]
@@ -4096,7 +3943,6 @@ def _run_order_process(cardinal, sess):
     lot_id = sess.get("lot_id")
     oid = str(sess.get("order_id", ""))
     buyer_user = sess.get("buyer_username", "")
-
     cfg = _load_config()
     if not proxies:
         if cfg.get("auto_deactivate_lots", True) and lot_id:
@@ -4106,12 +3952,12 @@ def _run_order_process(cardinal, sess):
                 lots[str(lot_id)]["enabled"] = False
                 cfg["lots"] = lots
                 _save_config(cfg)
+        refund_ok = False
         if cfg.get("auto_refund_enabled", True):
-            _try_refund(cardinal, oid)
-            _send_buyer_fp_msg(cardinal, chat_id, _render_buyer_msg("no_proxies_refund", order_id=oid, country_name=_country_display(country)), buyer_username=buyer_user)
-            _log_event("order_refund", level=logging.WARNING, order_id=oid, reason="no_proxies")
-        else:
-            _send_buyer_fp_msg(cardinal, chat_id, _render_buyer_msg("no_proxies_refund", order_id=oid, country_name=_country_display(country)), buyer_username=buyer_user)
+            refund_ok = _try_refund(cardinal, oid)
+        msg_key = "no_proxies_refund" if refund_ok else "no_proxies_no_refund"
+        _send_buyer_fp_msg(cardinal, chat_id, _render_buyer_msg(msg_key, order_id=oid, country_name=_country_display(country)), buyer_username=buyer_user)
+        _log_event("order_refund", level=logging.WARNING, order_id=oid, reason="no_proxies", refund_ok=refund_ok)
         sess["step"] = "failed"
         with _sessions_lock:
             to_del = [k for k, v in _buyer_sessions.items() if str(v.get("order_id") or "") == oid]
@@ -4119,23 +3965,26 @@ def _run_order_process(cardinal, sess):
                 _buyer_sessions.pop(k, None)
             _active_sessions[:] = [s for s in _active_sessions if str(s.get("order_id") or "") != oid]
         return
-
     _log_event("order_start", order_id=oid, lot_id=lot_id, login=login, country=country)
-
+    reserved_gift = None
     async def _async_worker():
+        nonlocal reserved_gift
         proxy_pool = ProxyPool(proxies)
         gift_pool = None
         if cfg.get("auto_redeem_gift", True):
-            g_codes = _load_gift_codes()
-            if g_codes:
-                gift_pool = GiftCodePool(g_codes, per_account=1)
-
+            reserved_gift = _reserve_gift_code()
+            if reserved_gift:
+                gift_pool = GiftCodePool([reserved_gift], per_account=1)
+                logger.info(f"[{login}] Для заказа #{oid} зарезервирован гифт-код {_mask_gift_code(reserved_gift)}")
+            else:
+                logger.warning(f"[{login}] В пуле нет свободных гифт-кодов для авто-активации")
         async def _guard_cb(login_str: str) -> str:
             sess["step"] = "waiting_guard"
+            sess.pop("guard_code", None)
             sess["guard_event"] = threading.Event()
+            _register_buyer_session(sess)
             _send_buyer_fp_msg(cardinal, chat_id, _render_buyer_msg("guard_request", login=login, order_id=oid, buyer_username=buyer_user), buyer_username=buyer_user)
             _log_event("order_guard_requested", order_id=oid, login=login)
-
             remind_enabled = cfg.get("buyer_inactivity_reminders", True)
             if remind_enabled:
                 got = await asyncio.get_event_loop().run_in_executor(None, lambda: sess["guard_event"].wait(timeout=60))
@@ -4144,13 +3993,11 @@ def _run_order_process(cardinal, sess):
                     remind_msg = _render_buyer_msg("reminder_guard", login=login, order_id=oid, buyer_username=buyer_user, country_name=_country_display(country))
                     _send_buyer_fp_msg(cardinal, chat_id, remind_msg, buyer_username=buyer_user)
                     got = await asyncio.get_event_loop().run_in_executor(None, lambda: sess["guard_event"].wait(timeout=120))
-
                 if got:
                     code = sess.get("guard_code", "")
                     sess["step"] = "processing"
                     _log_event("order_guard_received", order_id=oid, login=login)
                     return code
-
                 sess["step"] = "paused_silent"
                 sess["is_silent_guard"] = True
                 _log_event("order_guard_timeout_silent", level=logging.WARNING, order_id=oid, login=login)
@@ -4165,7 +4012,6 @@ def _run_order_process(cardinal, sess):
                 sess["step"] = "failed"
                 _log_event("order_guard_timeout", level=logging.WARNING, order_id=oid, login=login)
                 return ""
-
         sem = asyncio.Semaphore(1)
         res = await process_one_account(
             login=login,
@@ -4177,20 +4023,21 @@ def _run_order_process(cardinal, sess):
             gift_pool=gift_pool,
             guard_provider=_guard_cb,
         )
-
-        if gift_pool is not None:
-            _save_gift_codes(gift_pool.codes)
-
+        if reserved_gift:
+            if res.is_success and res.gift_redeemed:
+                _commit_gift_code(reserved_gift)
+                logger.info(f"[{login}] Гифт-код {_mask_gift_code(reserved_gift)} успешно активирован и списан.")
+            else:
+                _release_gift_code(reserved_gift)
+                logger.info(f"[{login}] Гифт-код {_mask_gift_code(reserved_gift)} возвращён в пул (активация не состоялась).")
         st = _load_stats()
         st["total_operations"] = st.get("total_operations", 0) + 1
         st["last_operation"] = f"{time.strftime('%d.%m.%Y %H:%M:%S')} (Заказ #{oid})"
-
         if cfg.get("auto_deactivate_lots", True) and lot_id:
             cfg_curr = _load_config()
             lots_curr = _get_lots_dict(cfg_curr)
             lot_entry = lots_curr.get(str(lot_id)) or {}
             cfg_proxies = list(lot_entry.get("proxies") or [])
-
             should_deactivate = False
             deact_reason = ""
             if len(cfg_proxies) == 0:
@@ -4211,7 +4058,6 @@ def _run_order_process(cardinal, sess):
                     deact_reason = "Все прокси лота недоступны при проверке."
                 else:
                     logger.info(f"[{NAME}] Лот #{lot_id} НЕ деактивирован: найдены доступные прокси в пуле лота.")
-
             if should_deactivate:
                 _log_event("lot_auto_deactivated", level=logging.WARNING, lot_id=lot_id, reason=deact_reason)
                 _deactivate_funpay_lot(cardinal, lot_id)
@@ -4221,7 +4067,6 @@ def _run_order_process(cardinal, sess):
                     _save_config(cfg_curr)
                 if bot_instance and admin_chat_id:
                     _tg_send(admin_chat_id, f"🛑 <b>Лот #{lot_id} деактивирован на FunPay</b>\n{deact_reason}")
-
         if res.is_success:
             st["success"] = st.get("success", 0) + 1
             if res.gift_redeemed:
@@ -4237,7 +4082,6 @@ def _run_order_process(cardinal, sess):
             )
             _send_buyer_fp_msg(cardinal, chat_id, success_msg, buyer_username=buyer_user)
             _log_event("order_success", order_id=oid, login=login, country=country, gift=res.gift_redeemed)
-
             gift_line = "\n• Активация гифта: 🎁 успешно" if res.gift_redeemed else ""
             _notify_tg(
                 f"✅ <b>Заказ #{oid} успешно выполнен!</b>\n\n"
@@ -4248,9 +4092,6 @@ def _run_order_process(cardinal, sess):
                 ntype="success"
             )
         else:
-            st["failed"] = st.get("failed", 0) + 1
-            _save_stats(st)
-
             if sess.get("is_silent_guard") and cfg.get("buyer_inactivity_reminders", True):
                 sess["step"] = "paused_silent"
                 pause_msg = (
@@ -4268,64 +4109,82 @@ def _run_order_process(cardinal, sess):
                     ntype="order"
                 )
                 return
-
+            if res.status == RegionResult.FAIL_WRONG_PASS:
+                sess["step"] = "waiting_credentials"
+                sess.pop("password", None)
+                _register_buyer_session(sess)
+                wrong_pwd_msg = (
+                    f"❌ <b>Неверный логин или пароль Steam для аккаунта «{login}»!</b>\n\n"
+                    f"Пожалуйста, проверьте введённые данные и отправьте правильные в этот чат в формате:\n"
+                    f"<code>логин:пароль</code>\n"
+                    f"(или отдельно логин, а затем пароль)."
+                )
+                _send_buyer_fp_msg(cardinal, chat_id, wrong_pwd_msg, buyer_username=buyer_user)
+                _log_event("order_wrong_password_prompt", order_id=oid, login=login)
+                _notify_tg(
+                    f"⚠️ <b>Заказ #{oid} · Неверный логин или пароль</b>\n\n"
+                    f"• Покупатель: <b>{buyer_user or '?'}</b>\n"
+                    f"• Логин: <code>{login}</code>\n"
+                    f"• Статус: бот запросил корректные данные у покупателя (без автовозврата).",
+                    ntype="order"
+                )
+                return
+            st["failed"] = st.get("failed", 0) + 1
+            _save_stats(st)
             sess["step"] = "failed"
-
             is_funding_issue = (
                 res.status == RegionResult.SKIP_FIXED
                 or "пополнен" in str(res.error or "").lower()
                 or "кошел" in str(res.error or "").lower()
                 or "баланс" in str(res.error or "").lower()
             )
-
+            refund_ok = False
             if cfg.get("auto_refund_enabled", True):
                 refund_ok = _try_refund(cardinal, oid)
-                if is_funding_issue:
-                    fail_msg = _render_buyer_msg("fixed_wallet_refund", order_id=oid, login=login, buyer_username=buyer_user)
-                else:
-                    fail_msg = _render_buyer_msg("error_refund", order_id=oid, reason=str(res.error or "ошибка смены региона"), login=login, buyer_username=buyer_user)
-                _send_buyer_fp_msg(cardinal, chat_id, fail_msg, buyer_username=buyer_user)
-                _log_event("order_refund", level=logging.WARNING, order_id=oid, login=login, refund_ok=refund_ok, is_funding=is_funding_issue)
-                _notify_tg(
-                    f"💸 <b>{'Автовозврат выполнен' if refund_ok else 'Сбой автовозврата'} · Заказ #{oid}</b>\n\n"
-                    f"• Покупатель: <b>{buyer_user or '?'}</b>\n"
-                    f"• Логин Steam: <code>{login}</code>\n"
-                    f"• Причина: {res.error or ('обнаружены предыдущие пополнения Steam' if is_funding_issue else 'ошибка смены региона')}",
-                    ntype="error"
-                )
+            fail_reason = str(res.error or "").strip()
+            if not fail_reason:
+                fail_reason = f"Steam отклонил смену региона на {_country_display(country)} (прокси отклонён или на аккаунте действует ограничение)"
+            if is_funding_issue:
+                fail_msg = _render_buyer_msg("fixed_wallet_refund" if refund_ok else "fixed_wallet_no_refund", order_id=oid, login=login, buyer_username=buyer_user)
             else:
-                if is_funding_issue:
-                    fail_msg = _render_buyer_msg("fixed_wallet_refund", order_id=oid, login=login, buyer_username=buyer_user)
-                else:
-                    fail_msg = _render_buyer_msg("error_refund", order_id=oid, reason=str(res.error or "ошибка авторизации"), login=login, buyer_username=buyer_user)
-                _send_buyer_fp_msg(cardinal, chat_id, fail_msg, buyer_username=buyer_user)
-                _log_event("order_failed", level=logging.WARNING, order_id=oid, login=login, err=str(res.error or "unknown"))
-                _notify_tg(
-                    f"⚠️ <b>Заказ #{oid} не выполнен</b>\n\n"
-                    f"• Покупатель: <b>{buyer_user or '?'}</b>\n"
-                    f"• Логин Steam: <code>{login}</code>\n"
-                    f"• Причина: {res.error or ('обнаружены предыдущие пополнения Steam' if is_funding_issue else 'ошибка смены региона')}\n"
-                    f"• Автовозврат выключен в настройках плагина.",
-                    ntype="error"
-                )
-
-        if sess.get("step") != "paused_silent":
+                fail_msg = _render_buyer_msg("error_refund" if refund_ok else "error_no_refund", order_id=oid, reason=fail_reason, login=login, buyer_username=buyer_user)
+            _send_buyer_fp_msg(cardinal, chat_id, fail_msg, buyer_username=buyer_user)
+            _log_event("order_result", level=logging.WARNING, order_id=oid, login=login, refund_ok=refund_ok, is_funding=is_funding_issue, reason=fail_reason)
+            _notify_tg(
+                f"💸 <b>{'Автовозврат выполнен' if refund_ok else ('Заказ отменён (без автовозврата)' if not cfg.get('auto_refund_enabled', True) else 'Сбой автовозврата')} · Заказ #{oid}</b>\n\n"
+                f"• Покупатель: <b>{buyer_user or '?'}</b>\n"
+                f"• Логин Steam: <code>{login}</code>\n"
+                f"• Причина: {fail_reason if not is_funding_issue else 'обнаружены предыдущие пополнения Steam'}",
+                ntype="error"
+            )
+        if sess.get("step") not in ("paused_silent", "waiting_credentials"):
             with _sessions_lock:
                 to_del = [k for k, v in _buyer_sessions.items() if str(v.get("order_id") or "") == oid]
                 for k in to_del:
                     _buyer_sessions.pop(k, None)
                 _active_sessions[:] = [s for s in _active_sessions if str(s.get("order_id") or "") != oid]
-
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(_async_worker())
     except Exception as e:
         logger.error(f"[{NAME}] Order processing error: {e}", exc_info=True)
+        if reserved_gift:
+            _release_gift_code(reserved_gift)
         try:
-            _send_buyer_fp_msg(cardinal, chat_id, f"❌ Произошла непредвиденная ошибка: {e}", buyer_username=buyer_user)
+            _send_buyer_fp_msg(
+                cardinal, chat_id,
+                "❌ Произошла непредвиденная ошибка при смене региона. Продавец уведомлен и решит проблему в ближайшее время.",
+                buyer_username=buyer_user
+            )
         except Exception:
             pass
+        _notify_tg(
+            f"❌ <b>Критическая ошибка заказа #{oid}</b>\n\n"
+            f"• Покупатель: <b>{buyer_user or '?'}</b>\n"
+            f"• Исключение: <code>{html.escape(str(e)[:250])}</code>",
+            ntype="error"
+        )
         with _sessions_lock:
             to_del = [k for k, v in _buyer_sessions.items() if str(v.get("order_id") or "") == oid]
             for k in to_del:
@@ -4333,11 +4192,13 @@ def _run_order_process(cardinal, sess):
             _active_sessions[:] = [s for s in _active_sessions if str(s.get("order_id") or "") != oid]
     finally:
         loop.close()
+_stop_inactivity_watcher = threading.Event()
 
 def _inactivity_watcher_loop(cardinal):
-    while True:
+    while not _stop_inactivity_watcher.is_set():
         try:
-            time.sleep(30)
+            if _stop_inactivity_watcher.wait(timeout=30):
+                break
             cfg = _load_config()
             if not cfg.get("plugin_enabled", True) or not cfg.get("buyer_inactivity_reminders", True):
                 continue
@@ -4351,7 +4212,6 @@ def _inactivity_watcher_loop(cardinal):
                 buyer_user = sess.get("buyer_username", "")
                 country_name = _country_display(sess.get("country", "KZ"))
                 login = sess.get("login", "")
-
                 if step == "waiting_login":
                     created = sess.get("created_at", now)
                     if (now - created) >= 180 and not sess.get("reminded_login"):
@@ -4365,7 +4225,6 @@ def _inactivity_watcher_loop(cardinal):
                         )
                         _send_buyer_fp_msg(cardinal, chat_id, msg, buyer_username=buyer_user)
                         _log_event("inactivity_reminder_sent", order_id=oid, step=step)
-
                 elif step == "waiting_password":
                     login_at = sess.get("login_time", now)
                     if (now - login_at) >= 120 and not sess.get("reminded_password"):
@@ -4381,32 +4240,27 @@ def _inactivity_watcher_loop(cardinal):
                         _log_event("inactivity_reminder_sent", order_id=oid, step=step)
         except Exception as e:
             logger.debug(f"[{NAME}] Ошибка цикла проверки неактивности: {e}")
-
 def init_cardinal(cardinal, *args):
     global cardinal_instance, bot_instance, admin_chat_id
     cardinal_instance = cardinal
     _init_storage()
-
     try:
+        _stop_inactivity_watcher.clear()
         threading.Thread(target=_inactivity_watcher_loop, args=(cardinal,), daemon=True, name="SRC_InactivityWatcher").start()
     except Exception as e:
         logger.warning(f"[{NAME}] Ошибка запуска фонового таймера напоминаний: {e}")
-
     bot_obj = getattr(getattr(cardinal, 'telegram', None), 'bot', None)
     globals()['bot_instance'] = bot_obj
-
     try:
         auth = getattr(getattr(cardinal, 'telegram', None), 'authorized_users', None)
         if isinstance(auth, dict) and auth:
             admin_chat_id = int(list(auth.keys())[0])
     except Exception:
         admin_chat_id = None
-
     try:
         cardinal.add_telegram_commands(UUID, [('src', 'Steam Region Changer: меню смены региона Steam', True)])
     except Exception as e:
         logger.warning(f"[{NAME}] Ошибка регистрации команд: {e}")
-
     if bot_obj:
         def _open_plugin_home(call):
             try:
@@ -4417,7 +4271,6 @@ def init_cardinal(cardinal, *args):
             mid = getattr(getattr(call, 'message', None), 'message_id', None)
             if cid:
                 _open_home(cid, mid)
-
         def _plugin_entry(data):
             data = str(data or '')
             if data in (CBT_SETTINGS, f'{UUID}:0'):
@@ -4426,12 +4279,10 @@ def init_cardinal(cardinal, *args):
             settings = getattr(_CBT, 'PLUGIN_SETTINGS', None)
             return bool((edit is not None and data.startswith(f'{edit}:{UUID}')) or
                         (settings is not None and data.startswith(f'{settings}:{UUID}')))
-
         try:
             cardinal.telegram.cbq_handler(_open_plugin_home, func=lambda call: _plugin_entry(getattr(call, 'data', None)))
         except Exception as e:
             logger.warning(f"[{NAME}] Не удалось привязать кнопку настроек: {e}")
-
         try:
             bot_obj.register_callback_query_handler(
                 _cb_router,
@@ -4439,23 +4290,19 @@ def init_cardinal(cardinal, *args):
             )
         except Exception as e:
             logger.warning(f"[{NAME}] Не удалось привязать callback-обработчик: {e}")
-
         def _cmd_src(message):
             cid = getattr(getattr(message, 'chat', None), 'id', None)
             if cid and _is_authorized(getattr(getattr(message, 'from_user', None), 'id', None)):
                 _open_home(cid)
-
         try:
             bot_obj.register_message_handler(_cmd_src, commands=['src', 'src_menu'])
         except Exception as e:
             logger.warning(f"[{NAME}] Не удалось привязать команду /src: {e}")
-
         def _msg_predicate(message):
             cid = getattr(getattr(message, 'chat', None), 'id', None)
             if not cid:
                 return False
             return cid in _waiting
-
         try:
             bot_obj.register_message_handler(_handle_waiting_message, func=_msg_predicate, content_types=['text', 'document'])
             if hasattr(bot_obj, 'message_handlers') and isinstance(bot_obj.message_handlers, list) and bot_obj.message_handlers:
@@ -4463,12 +4310,10 @@ def init_cardinal(cardinal, *args):
                 bot_obj.message_handlers.insert(0, h)
         except Exception as e:
             logger.warning(f"[{NAME}] Не удалось привязать обработчик ввода: {e}")
-
     logger.info(f"[{NAME}] Плагин инициализирован (v{VERSION})")
-
 def on_delete(cardinal, *args, **kwargs):
+    _stop_inactivity_watcher.set()
     logger.info(f"[{NAME}] Плагин удален.")
-
 BIND_TO_PRE_INIT = [init_cardinal]
 BIND_TO_NEW_ORDER = [handle_new_order]
 BIND_TO_NEW_MESSAGE = [handle_new_message]
