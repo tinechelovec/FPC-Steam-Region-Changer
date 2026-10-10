@@ -9,8 +9,35 @@ import os
 import random
 import re
 import shutil
+import subprocess
+import sys
 import threading
 import time
+
+_REQUIRED_PACKAGES = [
+    ("aiohttp", "aiohttp"),
+    ("requests", "requests"),
+    ("pysteamauth", "pysteamauth"),
+    ("colorama", "colorama"),
+]
+_missing_pkgs = []
+for _mod, _pkg in _REQUIRED_PACKAGES:
+    try:
+        __import__(_mod)
+    except ImportError:
+        _missing_pkgs.append(_pkg)
+
+if _missing_pkgs:
+    print(f"[Steam Region Changer] Установка отсутствующих библиотек: {', '.join(_missing_pkgs)}...")
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", *_missing_pkgs, "--quiet", "--no-warn-script-location"],
+            timeout=180,
+        )
+        print("[Steam Region Changer] Библиотеки успешно установлены.")
+    except Exception as _pip_err:
+        print(f"[Steam Region Changer] Ошибка авто-установки ({_pip_err}). Установите вручную: pip install {' '.join(_missing_pkgs)}")
+
 import requests
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,7 +45,7 @@ from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
 import aiohttp
-from aiohttp import ClientResponse, ClientSession
+from aiohttp import ClientResponse, ClientSession, FormData
 
 import html
 try:
@@ -36,10 +63,25 @@ BASE_DIR = os.getcwd()
 STORAGE_DIR = os.path.join(BASE_DIR, "storage", "plugins", "src_plugin")
 PLUGIN_LOG_DIR = STORAGE_DIR
 PLUGIN_LOG_FILE = os.path.join(PLUGIN_LOG_DIR, "src_plugin.log")
+_ANSI_STRIP_RE = re.compile(r"(\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]))")
+
+class _CleanFileFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        s = super().format(record)
+        return _ANSI_STRIP_RE.sub("", s)
 try:
     os.makedirs(PLUGIN_LOG_DIR, exist_ok=True)
+    if os.path.exists(PLUGIN_LOG_FILE) and os.path.getsize(PLUGIN_LOG_FILE) < 15 * 1024 * 1024:
+        try:
+            with open(PLUGIN_LOG_FILE, "r", encoding="utf-8", errors="ignore") as _f_clean:
+                _content = _f_clean.read()
+            if "\x1b" in _content:
+                with open(PLUGIN_LOG_FILE, "w", encoding="utf-8") as _f_clean:
+                    _f_clean.write(_ANSI_STRIP_RE.sub("", _content))
+        except Exception:
+            pass
     _fh = logging.FileHandler(PLUGIN_LOG_FILE, encoding="utf-8")
-    _fh.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s"))
+    _fh.setFormatter(_CleanFileFormatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s"))
     logger.addHandler(_fh)
 except Exception:
     pass
@@ -92,7 +134,7 @@ try:
 except Exception:
     tg_types = None
 NAME = "Steam Region Changer"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 DESCRIPTION = "Смена региона Steam (Steam Region Changer)"
 CREDITS = "@tinechelovec"
 UUID = "001ab503-775a-41c2-8b96-4207daaf33a7"
@@ -327,6 +369,15 @@ def normalize_proxy_url(p: str) -> str:
     elif len(parts) == 2:
         return f"{scheme}://{parts[0]}:{parts[1]}"
     return f"{scheme}://{rest}"
+DEFAULT_STEAM_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+}
+
 class ProxyRequestStrategy:
     def __init__(self, proxy: str | None = None):
         self._proxy = normalize_proxy_url(proxy) if proxy else None
@@ -339,6 +390,7 @@ class ProxyRequestStrategy:
             except Exception:
                 pass
             self._session = ClientSession(
+                headers=dict(DEFAULT_STEAM_HEADERS),
                 connector=aiohttp.TCPConnector(ssl=False),
                 timeout=aiohttp.ClientTimeout(
                     total=cfg_to,
@@ -362,6 +414,22 @@ class ProxyRequestStrategy:
                         kwargs["proxy_auth"] = aiohttp.BasicAuth(_u.user, _u.password)
                 except Exception:
                     pass
+        req_headers = dict(kwargs.get("headers") or {})
+        for hk, hv in DEFAULT_STEAM_HEADERS.items():
+            if hk not in req_headers:
+                req_headers[hk] = hv
+        if "api.steampowered.com" in url:
+            if "Origin" not in req_headers:
+                req_headers["Origin"] = "https://steamcommunity.com"
+            if "Referer" not in req_headers:
+                req_headers["Referer"] = "https://steamcommunity.com/login/home/?goto="
+        elif "steamcommunity.com" in url:
+            if "Referer" not in req_headers:
+                req_headers["Referer"] = "https://steamcommunity.com/"
+        elif "store.steampowered.com" in url:
+            if "Referer" not in req_headers:
+                req_headers["Referer"] = "https://store.steampowered.com/"
+        kwargs["headers"] = req_headers
         logger.debug(f"[{NAME}] [HTTP {method}] {url} через {_mask_proxy(self._proxy or 'прямое соединение')}")
         response = await session.request(method, url, **kwargs)
         return response
@@ -457,18 +525,88 @@ async def _try_import_manual_steam():
             self._manual_code = (code or "").strip().upper()
         def set_guard_provider(self, provider: GuardProvider | None) -> None:
             self._guard_provider = provider
+        async def _begin_auth_session(
+            self,
+            encrypted_password: str,
+            rsa_timestamp: int,
+        ):
+            from pysteamauth.pb2.steammessages_auth.steamclient_pb2 import (
+                CAuthentication_BeginAuthSessionViaCredentials_Request,
+                CAuthentication_BeginAuthSessionViaCredentials_Response,
+                EAuthTokenPlatformType,
+            )
+            from aiohttp import FormData
+            try:
+                from pysteamauth.pb2.enums_pb2 import ESessionPersistence
+                sess_persist = ESessionPersistence.k_ESessionPersistence_Persistent
+            except Exception:
+                sess_persist = 1
+            message = CAuthentication_BeginAuthSessionViaCredentials_Request(
+                account_name=self._login,
+                encrypted_password=encrypted_password,
+                encryption_timestamp=rsa_timestamp,
+                remember_login=True,
+                platform_type=EAuthTokenPlatformType.k_EAuthTokenPlatformType_WebBrowser,
+                website_id="Community",
+                persistence=sess_persist,
+                device_friendly_name="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            )
+            response = await self._requests.bytes(
+                method="POST",
+                url="https://api.steampowered.com/IAuthenticationService/BeginAuthSessionViaCredentials/v1",
+                data=FormData(
+                    fields=[
+                        ("input_protobuf_encoded", str(base64.b64encode(message.SerializeToString()), "utf8")),
+                    ],
+                ),
+            )
+            return CAuthentication_BeginAuthSessionViaCredentials_Response.FromString(response)
         async def login_to_steam(self) -> None:
             if await self.is_authorized():
                 return
             if not self._requests.cookies().get("sessionid"):
-                await self._requests.bytes(method="GET", url="https://steamcommunity.com")
+                try:
+                    await self._requests.bytes(method="GET", url="https://steamcommunity.com/login/home/?goto=")
+                except Exception:
+                    await self._requests.bytes(method="GET", url="https://steamcommunity.com")
             keys = await self._getrsakey()
             encrypted_password = self._encrypt_password(keys)
             auth_session = await self._begin_auth_session(
                 encrypted_password=encrypted_password,
                 rsa_timestamp=keys.timestamp,
             )
+            c_types = [getattr(c, "confirmation_type", None) for c in getattr(auth_session, "allowed_confirmations", [])]
+            logger.info(
+                f"[{self._login}] Steam auth_session начата: client_id={getattr(auth_session, 'client_id', '')} "
+                f"interval={getattr(auth_session, 'interval', 5)} confirmations={c_types}"
+            )
+            has_email = EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode in c_types
+            has_machine = 6 in c_types
+            if has_email or has_machine:
+                try:
+                    from aiohttp import FormData
+                    check_data = FormData(fields=[
+                        ("clientid", str(auth_session.client_id)),
+                        ("steamid", str(auth_session.steamid)),
+                    ])
+                    await self._requests.bytes(
+                        method="POST",
+                        url="https://login.steampowered.com/jwt/checkdevice",
+                        data=check_data,
+                        headers={
+                            "Origin": "https://steamcommunity.com",
+                            "Referer": "https://steamcommunity.com",
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                        },
+                    )
+                    logger.info(f"[{self._login}] checkdevice выполнен: Steam инициировал отправку кода на почту")
+                except Exception as _cd_e:
+                    logger.debug(f"[{self._login}] checkdevice: {_cd_e}")
             twofactor_requested = False
+            guard_type_str = "guard"
+            guard_detail_str = ""
+            has_mobile_push = False
+            session = None
             if auth_session.allowed_confirmations:
                 twofactor_conf = None
                 for conf in auth_session.allowed_confirmations:
@@ -478,37 +616,100 @@ async def _try_import_manual_steam():
                         EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode,
                     ):
                         twofactor_conf = conf
+                        if c_type == EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode:
+                            guard_type_str = "email"
+                            guard_detail_str = getattr(conf, "associated_message", "") or ""
+                        elif c_type == EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceCode:
+                            guard_type_str = "device"
+                            guard_detail_str = getattr(conf, "associated_message", "") or ""
                         break
+                    elif c_type == EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceConfirmation:
+                        has_mobile_push = True
                 if twofactor_conf:
                     twofactor_requested = True
-                    if self._guard_provider is not None:
-                        code = (await self._guard_provider(self._login) or "").strip().upper()
-                    else:
-                        code = self._manual_code
-                    if not code:
-                        raise GuardCodeSkipped()
                     c_type = getattr(twofactor_conf, "confirmation_type", None)
                     code_type = EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceCode
                     if c_type == EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode:
                         code_type = EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode
-                    await self._update_auth_session(
+                    poll_interval = max(2, int(getattr(auth_session, "interval", 3) or 3))
+                    for code_attempt in range(1, 4):
+                        if self._guard_provider is not None:
+                            try:
+                                code = (await self._guard_provider(
+                                    self._login,
+                                    guard_type=guard_type_str,
+                                    guard_detail=guard_detail_str,
+                                    is_retry=(code_attempt > 1),
+                                ) or "").strip().upper()
+                            except TypeError:
+                                code = (await self._guard_provider(self._login) or "").strip().upper()
+                        else:
+                            code = self._manual_code
+                        if not code:
+                            raise GuardCodeSkipped()
+                        logger.info(f"[{self._login}] Отправка Guard-кода в Steam (попытка {code_attempt}/3)...")
+                        from pysteamauth.errors.exceptions import SteamError
+                        try:
+                            await self._update_auth_session(
+                                client_id=auth_session.client_id,
+                                steamid=auth_session.steamid,
+                                code=code,
+                                code_type=code_type,
+                            )
+                            logger.info(f"[{self._login}] Guard-код отправлен в Steam, начинаем polling...")
+                        except SteamError as e:
+                            err_code = getattr(e, "error_code", None)
+                            logger.warning(f"[{self._login}] Steam отклонил Guard-код (код ошибки {err_code}): {e}")
+                            if err_code in (65, 88):
+                                if code_attempt < 3:
+                                    continue
+                                else:
+                                    raise GuardCodeRejected("Guard-код не принят Steam (неверный код)")
+                            raise
+                        for _poll_i in range(12):
+                            await asyncio.sleep(poll_interval)
+                            try:
+                                session = await self._poll_auth_session_status(
+                                    client_id=auth_session.client_id,
+                                    request_id=auth_session.request_id,
+                                )
+                            except Exception as _p_err:
+                                logger.debug(f"[{self._login}] Poll status ошибка: {_p_err}")
+                                session = None
+                            if session and session.refresh_token:
+                                break
+                        if session and session.refresh_token:
+                            break
+                        else:
+                            logger.warning(f"[{self._login}] Refresh token не получен после polling (попытка {code_attempt}/3)")
+                            if code_attempt < 3:
+                                continue
+                elif has_mobile_push:
+                    if self._guard_provider is not None:
+                        try:
+                            await self._guard_provider(self._login, guard_type="push", guard_detail="Steam Mobile App")
+                        except Exception:
+                            pass
+                    for _poll_i in range(30):
+                        await asyncio.sleep(3)
+                        session = await self._poll_auth_session_status(
+                            client_id=auth_session.client_id,
+                            request_id=auth_session.request_id,
+                        )
+                        if session and session.refresh_token:
+                            break
+            if not session or not session.refresh_token:
+                try:
+                    session = await self._poll_auth_session_status(
                         client_id=auth_session.client_id,
-                        steamid=auth_session.steamid,
-                        code=code,
-                        code_type=code_type,
+                        request_id=auth_session.request_id,
                     )
-            session = await self._poll_auth_session_status(
-                client_id=auth_session.client_id,
-                request_id=auth_session.request_id,
-            )
-            if not session.refresh_token:
+                except Exception:
+                    pass
+            if not session or not session.refresh_token:
                 if twofactor_requested:
                     raise GuardCodeRejected("Guard-код не принят Steam (неверный или просроченный код)")
-                elif auth_session.allowed_confirmations:
-                    has_mobile_push = any(
-                        getattr(c, "confirmation_type", None) == EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceConfirmation
-                        for c in auth_session.allowed_confirmations
-                    )
+                elif has_mobile_push or auth_session.allowed_confirmations:
                     if has_mobile_push:
                         raise SteamLoginFailed("Требуется подтвердить вход в мобильном приложении Steam (Steam Guard Push)")
                     c_names = [str(getattr(c, "confirmation_type", c)) for c in auth_session.allowed_confirmations]
@@ -1008,6 +1209,8 @@ async def process_one_account(
         last_error: str | None = None
         guard_rejections = 0
         guard_reject_limit = 3
+        reuse_proxy_on_guard = False
+        proxy = None
         attempt = 0
         while attempt < max_attempts:
             attempt += 1
@@ -1023,9 +1226,13 @@ async def process_one_account(
                         f"(попытка {attempt}/{max_attempts})"
                     )
                     await asyncio.sleep(rl_delay)
+                elif reuse_proxy_on_guard and proxy:
+                    logger.info(f"[{login}] повторная попытка ввода Guard на том же прокси (попытка {attempt}/{max_attempts})")
                 else:
                     logger.info(f"[{login}] следующий прокси (попытка {attempt}/{max_attempts})")
-            proxy = proxy_pool.get_next()
+            if not (reuse_proxy_on_guard and proxy):
+                proxy = proxy_pool.get_next()
+            reuse_proxy_on_guard = False
             if proxy is None:
                 _log_event("account_proxy_exhausted", level=logging.WARNING, login=login, reason="pool_empty")
                 last_status, last_error = RegionResult.FAIL_SESSION, "Все прокси недоступны (исключены из пула)"
@@ -1057,6 +1264,7 @@ async def process_one_account(
                             login, RegionResult.FAIL_WRONG_GUARD,
                             error="Неверный/просроченный Guard-код (исчерпаны попытки ввода)",
                         )
+                    reuse_proxy_on_guard = True
                     continue
                 except Exception as e:
                     msg = str(e)
@@ -1068,6 +1276,17 @@ async def process_one_account(
                     code_num = int(m.group(1)) if m else None
                     if code_num == 5 or "InvalidPassword" in msg or getattr(e, "error_code", None) == 5:
                         return AccountRegionResult(login, RegionResult.FAIL_WRONG_PASS, error="Неверный логин или пароль Steam")
+                    if code_num in (65, 88) or getattr(e, "error_code", None) in (65, 88):
+                        guard_rejections += 1
+                        last_status, last_error = RegionResult.FAIL_WRONG_GUARD, "Неверный Guard-код"
+                        _log_event("account_guard_rejected", level=logging.WARNING, login=login, count=guard_rejections, limit=guard_reject_limit)
+                        if guard_rejections >= guard_reject_limit:
+                            return AccountRegionResult(
+                                login, RegionResult.FAIL_WRONG_GUARD,
+                                error="Неверный/просроченный Guard-код (исчерпаны попытки ввода)",
+                            )
+                        reuse_proxy_on_guard = True
+                        continue
                     if code_num == 84:
                         last_status, last_error = RegionResult.FAIL_RATE_LIMIT, msg
                         _log_event("account_rate_limit", level=logging.WARNING, login=login, code=84, attempt=attempt)
@@ -1444,8 +1663,20 @@ DEFAULT_BUYER_MESSAGES: dict[str, str] = {
     ),
     "guard_request": (
         "🔐 Требуется код Steam Guard!\n\n"
-        "На ваш мобильный Guard или почту отправлен проверочный код.\n"
+        "{guard_destination}\n\n"
         "Пожалуйста, отправьте 5-значный код сообщением в этот чат:"
+    ),
+    "guard_retry": (
+        "⚠️ Введённый проверочный код не подошёл или истёк срок его действия!\n"
+        "(Срок действия кода Steam составляет около 2 минут).\n\n"
+        "🔄 Запрошен новый код для входа в Steam.\n"
+        "{guard_destination}\n\n"
+        "Пожалуйста, отправьте новый 5-значный проверочный код сообщением в этот чат:"
+    ),
+    "guard_push": (
+        "📱 Требуется подтверждение входа!\n\n"
+        "Пожалуйста, откройте мобильное приложение Steam на телефоне и подтвердите попытку входа (нажмите «Подтвердить» в уведомлении Steam Guard).\n\n"
+        "⏳ Бот ожидает подтверждения входа..."
     ),
     "guard_received": (
         "✅ Код Steam Guard принят!\n\n"
@@ -1510,6 +1741,8 @@ BUYER_MESSAGE_LABELS: dict[str, str] = {
     "ask_password": "🔑 Шаг 2: Запрос пароля",
     "data_received": "⏳ Данные получены (старт)",
     "guard_request": "🔐 Запрос Steam Guard",
+    "guard_retry": "⚠️ Повторный запрос Guard",
+    "guard_push": "📱 Запрос подтверждения Push",
     "guard_received": "✅ Код Guard принят",
     "success": "✅ Успешная смена региона",
     "reminder_login": "🔔 Напоминание: ввод логина",
@@ -1527,7 +1760,9 @@ BUYER_MESSAGE_HINTS: dict[str, str] = {
     "welcome": "Переменные: <code>{buyer_username}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
     "ask_password": "Переменные: <code>{login}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
     "data_received": "Переменные: <code>{login}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
-    "guard_request": "Переменные: <code>{login}</code>, <code>{order_id}</code>",
+    "guard_request": "Переменные: <code>{login}</code>, <code>{order_id}</code>, <code>{guard_destination}</code>",
+    "guard_retry": "Переменные: <code>{login}</code>, <code>{order_id}</code>, <code>{guard_destination}</code>",
+    "guard_push": "Переменные: <code>{login}</code>, <code>{order_id}</code>",
     "guard_received": "Переменные: <code>{country_name}</code>, <code>{login}</code>, <code>{order_id}</code>",
     "success": "Переменные: <code>{country_name}</code>, <code>{login}</code>, <code>{order_id}</code>",
     "reminder_login": "Переменные: <code>{buyer_username}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
@@ -1548,6 +1783,8 @@ def _get_buyer_messages() -> dict[str, str]:
     if isinstance(saved, dict):
         for k, v in saved.items():
             if k in DEFAULT_BUYER_MESSAGES and v:
+                if "{guard_destination}" in DEFAULT_BUYER_MESSAGES[k] and "{guard_destination}" not in str(v):
+                    continue
                 merged[k] = str(v)
     return merged
 def _render_buyer_msg(key: str, **kwargs) -> str:
@@ -1559,6 +1796,7 @@ def _render_buyer_msg(key: str, **kwargs) -> str:
         "country_name": "выбранную страну",
         "order_id": "",
         "reason": "ошибка смены региона",
+        "guard_destination": "На ваш мобильный Guard или почту отправлен проверочный код.",
     }
     merged_kwargs = {**defaults, **kwargs}
     try:
@@ -3637,12 +3875,19 @@ def _process_incoming_order(cardinal, order, event=None, order_text: str = ""):
         msg_key = "no_proxies_refund" if refund_ok else "no_proxies_no_refund"
         _send_buyer_fp_msg(cardinal, chat_id, _render_buyer_msg(msg_key, order_id=oid, country_name=country_name), buyer_username=buyer_name)
         _log_event("order_refund", level=logging.WARNING, order_id=oid, reason="no_proxies", refund_ok=refund_ok)
+        deact_notice = "🛑 Лот деактивирован на FunPay.\n" if cfg.get('auto_deactivate_lots', True) else ""
+        if refund_ok:
+            refund_notice = "💸 Автовозврат выполнен."
+        elif not cfg.get('auto_refund_enabled', True):
+            refund_notice = "⚠️ Автовозврат выключен."
+        else:
+            refund_notice = "❌ Сбой автовозврата."
         _notify_tg(
             f"🛑 <b>Заказ #{oid} отклонён</b>\n\n"
             f"• Лот: <b>#{lot_id}</b> ({country_name})\n"
             f"• Причина: закончились прокси\n"
-            f"{'🛑 Лот деактивирован на FunPay.\n' if cfg.get('auto_deactivate_lots', True) else ''}"
-            f"{'💸 Автовозврат выполнен.' if refund_ok else ('⚠️ Автовозврат выключен.' if not cfg.get('auto_refund_enabled', True) else '❌ Сбой автовозврата.')}",
+            f"{deact_notice}"
+            f"{refund_notice}",
             ntype="error"
         )
         return
@@ -3978,21 +4223,61 @@ def _run_order_process(cardinal, sess):
                 logger.info(f"[{login}] Для заказа #{oid} зарезервирован гифт-код {_mask_gift_code(reserved_gift)}")
             else:
                 logger.warning(f"[{login}] В пуле нет свободных гифт-кодов для авто-активации")
-        async def _guard_cb(login_str: str) -> str:
+        guard_call_count = 0
+        async def _guard_cb(login_str: str, guard_type: str = "guard", guard_detail: str = "", is_retry: bool = False) -> str:
+            nonlocal guard_call_count
+            guard_call_count += 1
+            if guard_type == "push":
+                sess["step"] = "waiting_push"
+                _register_buyer_session(sess)
+                push_msg = _render_buyer_msg(
+                    "guard_push",
+                    login=login,
+                    order_id=oid,
+                    buyer_username=buyer_user,
+                    country_name=_country_display(country),
+                )
+                _send_buyer_fp_msg(cardinal, chat_id, push_msg, buyer_username=buyer_user)
+                _log_event("order_guard_push_requested", order_id=oid, login=login)
+                return ""
             sess["step"] = "waiting_guard"
             sess.pop("guard_code", None)
             sess["guard_event"] = threading.Event()
             _register_buyer_session(sess)
-            _send_buyer_fp_msg(cardinal, chat_id, _render_buyer_msg("guard_request", login=login, order_id=oid, buyer_username=buyer_user), buyer_username=buyer_user)
-            _log_event("order_guard_requested", order_id=oid, login=login)
+            if guard_type == "email":
+                hint_domain = f" (@{guard_detail})" if guard_detail and "@" not in guard_detail else (f" ({guard_detail})" if guard_detail else "")
+                dest_str = f"📧 Проверочный код отправлен на вашу почту{hint_domain}."
+            elif guard_type == "device":
+                dest_str = "📱 Откройте мобильное приложение Steam Guard и посмотрите 5-значный проверочный код."
+            else:
+                dest_str = "На ваш мобильный Guard или почту отправлен проверочный код."
+            msg_key = "guard_retry" if (is_retry or guard_call_count > 1) else "guard_request"
+            req_msg = _render_buyer_msg(
+                msg_key,
+                login=login,
+                order_id=oid,
+                buyer_username=buyer_user,
+                guard_destination=dest_str,
+                country_name=_country_display(country),
+            )
+            _send_buyer_fp_msg(cardinal, chat_id, req_msg, buyer_username=buyer_user)
+            _log_event("order_guard_requested", order_id=oid, login=login, attempt=guard_call_count, guard_type=guard_type)
             remind_enabled = cfg.get("buyer_inactivity_reminders", True)
             if remind_enabled:
-                got = await asyncio.get_event_loop().run_in_executor(None, lambda: sess["guard_event"].wait(timeout=60))
+                got = await asyncio.get_event_loop().run_in_executor(None, lambda: sess["guard_event"].wait(timeout=90))
                 if not got:
                     _log_event("order_guard_reminder_sent", order_id=oid, login=login)
                     remind_msg = _render_buyer_msg("reminder_guard", login=login, order_id=oid, buyer_username=buyer_user, country_name=_country_display(country))
                     _send_buyer_fp_msg(cardinal, chat_id, remind_msg, buyer_username=buyer_user)
-                    got = await asyncio.get_event_loop().run_in_executor(None, lambda: sess["guard_event"].wait(timeout=120))
+                    got = await asyncio.get_event_loop().run_in_executor(None, lambda: sess["guard_event"].wait(timeout=180))
+                    if not got:
+                        _send_buyer_fp_msg(
+                            cardinal, chat_id,
+                            f"⏳ Мы всё ещё ожидаем код Steam Guard для заказа #{oid}.\n\n"
+                            f"Пожалуйста, проверьте мобильное приложение Steam или почту и отправьте проверочный код в этот чат.",
+                            buyer_username=buyer_user
+                        )
+                        got = await asyncio.get_event_loop().run_in_executor(None, lambda: sess["guard_event"].wait(timeout=330))
                 if got:
                     code = sess.get("guard_code", "")
                     sess["step"] = "processing"
@@ -4003,7 +4288,7 @@ def _run_order_process(cardinal, sess):
                 _log_event("order_guard_timeout_silent", level=logging.WARNING, order_id=oid, login=login)
                 return ""
             else:
-                got = await asyncio.get_event_loop().run_in_executor(None, lambda: sess["guard_event"].wait(timeout=120))
+                got = await asyncio.get_event_loop().run_in_executor(None, lambda: sess["guard_event"].wait(timeout=600))
                 if got:
                     code = sess.get("guard_code", "")
                     sess["step"] = "processing"
@@ -4240,9 +4525,33 @@ def _inactivity_watcher_loop(cardinal):
                         _log_event("inactivity_reminder_sent", order_id=oid, step=step)
         except Exception as e:
             logger.debug(f"[{NAME}] Ошибка цикла проверки неактивности: {e}")
+def _check_duplicate_plugin_files():
+    try:
+        plugins_dir = os.path.join(BASE_DIR, "plugins")
+        if not os.path.isdir(plugins_dir):
+            return
+        current_name = os.path.basename(__file__) if "__file__" in globals() else "SRC-Plugin.py"
+        duplicates = []
+        for fname in os.listdir(plugins_dir):
+            if not fname.endswith(".py"):
+                continue
+            if fname == current_name:
+                continue
+            f_lower = fname.lower()
+            if any(t in f_lower for t in ("src-plugin", "steam region changer", "src_plugin", "steam-region-changer")):
+                duplicates.append(fname)
+        if duplicates:
+            logger.warning(
+                f"[{NAME}] ⚠️ ВНИМАНИЕ: в папке plugins/ обнаружены дубликаты плагина: {', '.join(duplicates)}! "
+                f"Наличие нескольких копий приводит к конфликту UUID в Cardinal. "
+                f"Пожалуйста, удалите лишние копии из папки plugins/!"
+            )
+    except Exception:
+        pass
 def init_cardinal(cardinal, *args):
     global cardinal_instance, bot_instance, admin_chat_id
     cardinal_instance = cardinal
+    _check_duplicate_plugin_files()
     _init_storage()
     try:
         _stop_inactivity_watcher.clear()
