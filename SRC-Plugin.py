@@ -145,7 +145,7 @@ try:
 except Exception:
     tg_types = None
 NAME = "Steam Region Changer"
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 DESCRIPTION = "Смена региона Steam (Steam Region Changer)"
 CREDITS = "@tinechelovec"
 UUID = "001ab503-775a-41c2-8b96-4207daaf33a7"
@@ -3989,14 +3989,119 @@ _RC_EXPLICIT_MARKERS = [
     "перенос региона", "change region", "region change"
 ]
 
+def _normalize_title(t: str) -> str:
+    if not t:
+        return ""
+    s = str(t).strip().casefold()
+    s = re.sub(r'\s+', ' ', s)
+    return s.strip(" \t\r\n.,;:|!?-–—")
+
+
+def _get_seller_profile_lots(cardinal) -> list[Any]:
+    if not cardinal:
+        return []
+    res: list[Any] = []
+    seen: set[str] = set()
+    for p_obj in (getattr(cardinal, 'profile', None), getattr(cardinal, 'curr_profile', None)):
+        if p_obj:
+            if hasattr(p_obj, 'get_sorted_lots'):
+                try:
+                    sl_dict = p_obj.get_sorted_lots(1)
+                    if isinstance(sl_dict, dict):
+                        for item in sl_dict.values():
+                            iid = str(getattr(item, 'id', '') or '')
+                            if iid and iid not in seen:
+                                seen.add(iid)
+                                res.append(item)
+                except Exception:
+                    pass
+            if hasattr(p_obj, 'get_lots'):
+                try:
+                    gl = p_obj.get_lots() or []
+                    for item in gl:
+                        iid = str(getattr(item, 'id', '') or '')
+                        if iid and iid not in seen:
+                            seen.add(iid)
+                            res.append(item)
+                except Exception:
+                    pass
+    if not res and getattr(cardinal, 'account', None):
+        try:
+            gl = cardinal.account.get_my_subcategory_lots(2044) or []
+            for item in gl:
+                iid = str(getattr(item, 'id', '') or '')
+                if iid and iid not in seen:
+                    seen.add(iid)
+                    res.append(item)
+        except Exception:
+            pass
+    return res
+
+
 def _find_lot_for_order(cardinal, order, event=None, order_text: str = "") -> tuple[str | None, dict[str, Any] | None, str]:
     cfg = _load_config()
     lots = _get_lots_dict(cfg)
     if not lots:
         return (None, None, "no_configured_lots")
 
+
+    order_id_clean = str(getattr(order, 'id', '') or getattr(event, 'order_id', '') or getattr(event, 'id', '') or '').lstrip('#').strip()
+    subcat = getattr(order, 'subcategory', None)
+    subcat_id = getattr(subcat, 'id', None) or getattr(order, 'subcategory_id', None)
+    subcat_id_clean = str(subcat_id or '2044')
+
+    objects = [x for x in (order, event) if x is not None]
+    for parent in list(objects):
+        for nested_name in ('lot', 'offer', 'lot_shortcut', 'offer_shortcut', 'node', 'fields', 'data'):
+            nested = parent.get(nested_name) if isinstance(parent, dict) else getattr(parent, nested_name, None)
+            if nested is not None and all(nested is not obj for obj in objects):
+                objects.append(nested)
+
+    candidate_lot_ids: list[str] = []
+    seen_candidates: set[str] = set()
+
+    def _add_cand(val: Any) -> None:
+        if val is None or isinstance(val, bool):
+            return
+        try:
+            s = str(val).strip()
+            if s.isdigit() and int(s) > 0:
+                if s != "2044" and s != subcat_id_clean and s != order_id_clean and s not in seen_candidates:
+                    seen_candidates.add(s)
+                    candidate_lot_ids.append(s)
+        except Exception:
+            pass
+
+    for obj in objects:
+        for name in ('lot_id', 'offer_id'):
+            v = obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+            _add_cand(v)
+        if obj is not order and obj is not event:
+            v = obj.get('id') if isinstance(obj, dict) else getattr(obj, 'id', None)
+            _add_cand(v)
+
+    for obj in (order, event):
+        html_val = obj.get('html') if isinstance(obj, dict) else getattr(obj, 'html', None)
+        if isinstance(html_val, str) and html_val:
+            for m in re.finditer(r'(?:offer\?id=|data-offer=["\']|data-lot-id=["\'])(\d+)', html_val):
+                _add_cand(m.group(1))
+
+    if candidate_lot_ids:
+        for cand_id in candidate_lot_ids:
+            if cand_id in lots:
+                lcfg = lots[cand_id]
+                if not lcfg.get("enabled", True):
+                    return (None, None, f"lot_disabled_{cand_id}")
+                return (cand_id, lcfg, "direct_candidate_match")
+
+
+
+        return (None, None, f"different_lot_id_ignored_{candidate_lot_ids[0]}")
+
+
     texts: list[str] = []
     for s in [
+        getattr(order, 'short_description', None),
         getattr(order, 'description', None),
         getattr(order, 'title', None),
         getattr(order, 'full_description', None),
@@ -4008,16 +4113,11 @@ def _find_lot_for_order(cardinal, order, event=None, order_text: str = "") -> tu
             texts.append(txt)
     combined_texts = " ".join(texts).lower()
 
-
     is_topup = any(m in combined_texts for m in _TOPUP_MARKERS) and not any(m in combined_texts for m in _RC_EXPLICIT_MARKERS)
     if is_topup:
         return (None, None, "topup_order_ignored")
 
-    subcat = getattr(order, 'subcategory', None)
-    subcat_id = getattr(subcat, 'id', None) or getattr(order, 'subcategory_id', None)
     subcat_name = str(getattr(subcat, 'name', '') or getattr(order, 'subcategory_name', '') or '').lower()
-
-
 
     is_rc_cat = False
     if subcat_id is not None and str(subcat_id) == "2044":
@@ -4031,99 +4131,89 @@ def _find_lot_for_order(cardinal, order, event=None, order_text: str = "") -> tu
         if any(other in subcat_name for other in ("пополнение", "баланс", "аккаунт", "ключ", "гифт", "gift", "wallet", "предмет", "валют")):
             return (None, None, "different_category_name_ignored")
 
-
     if not is_rc_cat and not any(m in combined_texts for m in _RC_EXPLICIT_MARKERS):
         return (None, None, "not_region_change_order")
 
-    candidates: list[tuple[str, str]] = []
-    for obj in (event, order):
-        if obj is not None:
-            lid = getattr(obj, 'lot_id', None)
-            if lid is not None and str(lid).strip():
-                candidates.append((str(lid).strip(), "event_attribute"))
-            lot_obj = getattr(obj, 'lot', None) or getattr(obj, 'offer', None)
-            if lot_obj is not None:
-                lid2 = getattr(lot_obj, 'id', None)
-                if lid2 is not None and str(lid2).strip():
-                    candidates.append((str(lid2).strip(), "lot_object"))
-    for cand_id, src in candidates:
-        if cand_id in lots:
-            return (cand_id, lots[cand_id], f"direct_candidate_{src}")
 
-    seller_lots = []
-    if cardinal:
-        prof = getattr(cardinal, 'profile', None)
-        if prof and hasattr(prof, 'get_lots'):
-            try:
-                seller_lots = prof.get_lots() or []
-            except Exception:
-                pass
-        if not seller_lots and getattr(cardinal, 'account', None):
-            try:
-                seller_lots = cardinal.account.get_my_subcategory_lots(2044) or []
-            except Exception:
-                pass
+    order_desc_candidates: list[str] = []
+    for s in [
+        getattr(order, 'short_description', None),
+        getattr(order, 'description', None),
+        getattr(order, 'title', None),
+    ]:
+        if s:
+            sc = str(s).strip()
+            if sc and sc not in order_desc_candidates:
+                order_desc_candidates.append(sc)
+
+    seller_lots = _get_seller_profile_lots(cardinal)
+
+    seller_lots.sort(key=lambda l: len(str(getattr(l, 'description', None) or getattr(l, 'title', None) or '')), reverse=True)
+
+    matched_seller_lot_id: str | None = None
     for s_lot in seller_lots:
-        slid = str(getattr(s_lot, 'id', '') or '')
+        slid = str(getattr(s_lot, 'id', '') or getattr(s_lot, 'offer_id', '') or '').strip()
         sdesc = str(getattr(s_lot, 'description', None) or getattr(s_lot, 'title', None) or '').strip()
-        if slid and sdesc:
-            sdesc_low = sdesc.lower()
-            for t in texts:
-                t_low = t.lower()
-                if (sdesc_low in t_low or t_low in sdesc_low) and len(sdesc_low) >= 5:
-                    if slid in lots:
-                        return (slid, lots[slid], "profile_desc_match")
-                    else:
-                        candidates.append((slid, "profile_desc_unconfigured"))
+        if not slid or not sdesc:
+            continue
+        sdesc_norm = _normalize_title(sdesc)
+        if len(sdesc_norm) < 3:
+            continue
+
+        is_match = False
+        for odc in order_desc_candidates:
+            if _normalize_title(odc) == sdesc_norm:
+                is_match = True
+                break
+
+        if not is_match and order_text:
+            txt_norm = _normalize_title(order_text)
+            if len(sdesc_norm) >= 4 and re.search(r'(?:^|[\.,\|;\n\r])\s*' + re.escape(sdesc_norm) + r'\s*(?:$|[\.,\|;\n\r])', txt_norm):
+                is_match = True
+
+        if is_match:
+            matched_seller_lot_id = slid
+            break
+
+    if matched_seller_lot_id:
+        if matched_seller_lot_id in lots:
+            lcfg = lots[matched_seller_lot_id]
+            if not lcfg.get("enabled", True):
+                return (None, None, f"lot_disabled_{matched_seller_lot_id}")
+            return (matched_seller_lot_id, lcfg, "seller_lot_match")
+        else:
+
+            return (None, None, f"other_seller_lot_ignored_{matched_seller_lot_id}")
+
+
     for lid, lcfg in lots.items():
-        ltitle = str(lcfg.get("title") or '').strip().lower()
-        if ltitle and not ltitle.startswith("лот ") and not ltitle.startswith("лот #") and len(ltitle) >= 4:
-            for t in texts:
-                t_low = t.lower()
-                if (ltitle in t_low or t_low in ltitle):
-                    return (lid, lcfg, "config_title_match")
-    if is_rc_cat or any(p in combined_texts for p in _RC_EXPLICIT_MARKERS):
-        detected_cc = None
-        if any(k in combined_texts for k in ["казахстан", "тенге", " kz", "(kz)", "kz "]):
-            detected_cc = "KZ"
-        elif any(k in combined_texts for k in ["турци", "лир", " tr", "(tr)", "tr "]):
-            detected_cc = "TR"
-        elif any(k in combined_texts for k in ["украин", "гривн", " ua", "(ua)", "ua "]):
-            detected_cc = "UA"
-        elif any(k in combined_texts for k in ["росси", "рубл", " ru", "(ru)", "ru "]):
-            detected_cc = "RU"
-        elif any(k in combined_texts for k in ["сша", "доллар", " us", "(us)", "usa"]):
-            detected_cc = "US"
-        elif any(k in combined_texts for k in ["аргентин", "песо", " ar", "(ar)", "ar "]):
-            detected_cc = "AR"
-        elif any(k in combined_texts for k in ["болгари", " bg", "(bg)", "bg "]):
-            detected_cc = "BG"
-        if detected_cc:
-            matched = [
-                (lid, lcfg) for lid, lcfg in lots.items()
-                if lcfg.get("country", "").upper() == detected_cc and lcfg.get("enabled", True)
-            ]
-            if not matched:
-                matched = [
-                    (lid, lcfg) for lid, lcfg in lots.items()
-                    if lcfg.get("country", "").upper() == detected_cc
-                ]
-            if len(matched) == 1:
-                lid, lcfg = matched[0]
-                return (lid, lcfg, f"country_match_{detected_cc}")
-            elif len(matched) > 1:
-                best_lid, best_lcfg, best_score = matched[0][0], matched[0][1], 0
-                for mlid, mlcfg in matched:
-                    ml_title = str(mlcfg.get("title") or '').lower()
-                    score = sum(1 for w in ml_title.split() if len(w) >= 3 and w in combined_texts)
-                    if score > best_score:
-                        best_score = score
-                        best_lid, best_lcfg = mlid, mlcfg
-                return (best_lid, best_lcfg, f"country_match_{detected_cc}_scored")
-    for cand_id, src in candidates:
-        if cand_id:
-            return (cand_id, None, f"candidate_not_in_config_{src}")
-    return (None, None, "no_matching_lot")
+        ltitle = str(lcfg.get("title") or '').strip()
+        if not ltitle or ltitle.lower().startswith("лот ") or ltitle.lower().startswith("лот #"):
+            continue
+        ltitle_norm = _normalize_title(ltitle)
+        if len(ltitle_norm) < 4:
+            continue
+
+        is_match = False
+        for odc in order_desc_candidates:
+            if _normalize_title(odc) == ltitle_norm:
+                is_match = True
+                break
+
+        if not is_match and order_text:
+            txt_norm = _normalize_title(order_text)
+            if re.search(r'(?:^|[\.,\|;\n\r])\s*' + re.escape(ltitle_norm) + r'\s*(?:$|[\.,\|;\n\r])', txt_norm):
+                is_match = True
+
+        if is_match:
+            if not lcfg.get("enabled", True):
+                return (None, None, f"lot_disabled_{lid}")
+            return (lid, lcfg, "config_title_strict_match")
+
+
+    return (None, None, "not_configured_plugin_lot")
+
+
 def _process_incoming_order(cardinal, order, event=None, order_text: str = ""):
     global cardinal_instance
     if cardinal_instance is None:
