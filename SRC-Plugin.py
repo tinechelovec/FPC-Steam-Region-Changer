@@ -145,7 +145,7 @@ try:
 except Exception:
     tg_types = None
 NAME = "Steam Region Changer"
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 DESCRIPTION = "Смена региона Steam (Steam Region Changer)"
 CREDITS = "@tinechelovec"
 UUID = "001ab503-775a-41c2-8b96-4207daaf33a7"
@@ -337,13 +337,28 @@ class BatchRegionResult:
     def gift_failed(self) -> list[tuple[str, str, str]]:
         return [(r.login, code, msg) for r in self.results
                 for (code, ok, msg) in r.gift_results if not ok]
+def _is_valid_port(p: Any) -> bool:
+    try:
+        val = int(str(p).strip())
+        return 1 <= val <= 65535
+    except (ValueError, TypeError):
+        return False
+
 def _is_ip_or_host(s: str) -> bool:
     s = str(s or "").strip()
-    if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', s):
+    if not s:
+        return False
+    if s.lower() in ("localhost", "127.0.0.1"):
         return True
+    if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', s):
+        parts = s.split('.')
+        return all(0 <= int(x) <= 255 for x in parts)
     if '.' in s and re.match(r'^[a-zA-Z0-9_\-\.]+$', s):
         return True
+    if re.match(r'^[a-zA-Z0-9_\-]+$', s):
+        return True
     return False
+
 def normalize_proxy_url(p: str) -> str:
     p = (p or "").strip().strip("'\"` \t\r\n")
     if not p:
@@ -354,36 +369,68 @@ def normalize_proxy_url(p: str) -> str:
         scheme = m_scheme.group(1).lower()
         rest = p[m_scheme.end():]
     elif "://" in p:
-        scheme, rest = p.split("://", 1)
-        scheme = scheme.lower()
+        scheme_part, rest = p.split("://", 1)
+        if scheme_part.lower() in ("http", "https", "socks5", "socks5h", "socks4", "socks4a"):
+            scheme = scheme_part.lower()
+        else:
+            return ""
     else:
         rest = p
+
     rest = rest.rstrip("/").strip()
+    if not rest:
+        return ""
+
     if "@" in rest:
-        left, right = rest.split("@", 1)
-        left_parts = left.split(":")
-        right_parts = right.split(":")
-        left_has_port = len(left_parts) == 2 and left_parts[1].isdigit()
-        right_has_port = len(right_parts) == 2 and right_parts[1].isdigit()
-        if left_has_port and not right_has_port:
-            return f"{scheme}://{right}@{left}"
-        return f"{scheme}://{rest}"
+        left, right = rest.rsplit("@", 1)
+        left = left.strip()
+        right = right.strip()
+        if ":" in right:
+            r_parts = right.split(":")
+            if len(r_parts) == 2 and _is_ip_or_host(r_parts[0]) and _is_valid_port(r_parts[1]):
+                if left:
+                    return f"{scheme}://{left}@{r_parts[0]}:{r_parts[1]}"
+                return f"{scheme}://{r_parts[0]}:{r_parts[1]}"
+        if ":" in left:
+            l_parts = left.split(":")
+            if len(l_parts) == 2 and _is_ip_or_host(l_parts[0]) and _is_valid_port(l_parts[1]):
+                if right:
+                    return f"{scheme}://{right}@{l_parts[0]}:{l_parts[1]}"
+                return f"{scheme}://{l_parts[0]}:{l_parts[1]}"
+        return ""
+
     parts = rest.split(":")
+    if len(parts) == 2:
+        host, port = parts[0].strip(), parts[1].strip()
+        if _is_ip_or_host(host) and _is_valid_port(port):
+            return f"{scheme}://{host}:{port}"
+        return ""
+
     if len(parts) == 4:
-        p0, p1, p2, p3 = parts
-        if _is_ip_or_host(p0) and p1.isdigit():
+        p0, p1, p2, p3 = [x.strip() for x in parts]
+        if _is_ip_or_host(p0) and _is_valid_port(p1):
             return f"{scheme}://{p2}:{p3}@{p0}:{p1}"
-        elif _is_ip_or_host(p2) and p3.isdigit():
+        elif _is_ip_or_host(p2) and _is_valid_port(p3):
             return f"{scheme}://{p0}:{p1}@{p2}:{p3}"
-        elif p1.isdigit() and not p3.isdigit():
+        elif _is_valid_port(p1) and not _is_valid_port(p3):
             return f"{scheme}://{p2}:{p3}@{p0}:{p1}"
-        elif p3.isdigit() and not p1.isdigit():
+        elif _is_valid_port(p3) and not _is_valid_port(p1):
             return f"{scheme}://{p0}:{p1}@{p2}:{p3}"
-        else:
-            return f"{scheme}://{p2}:{p3}@{p0}:{p1}"
-    elif len(parts) == 2:
-        return f"{scheme}://{parts[0]}:{parts[1]}"
-    return f"{scheme}://{rest}"
+        return ""
+
+    if len(parts) > 4:
+        p0, p1 = parts[0].strip(), parts[1].strip()
+        if _is_ip_or_host(p0) and _is_valid_port(p1):
+            user = parts[2].strip()
+            pwd = ":".join(parts[3:]).strip()
+            return f"{scheme}://{user}:{pwd}@{p0}:{p1}"
+        last_host, last_port = parts[-2].strip(), parts[-1].strip()
+        if _is_ip_or_host(last_host) and _is_valid_port(last_port):
+            user = parts[0].strip()
+            pwd = ":".join(parts[1:-2]).strip()
+            return f"{scheme}://{user}:{pwd}@{last_host}:{last_port}"
+
+    return ""
 DEFAULT_STEAM_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -576,6 +623,18 @@ async def _try_import_manual_steam():
             self._manual_code = (code or "").strip().upper()
         def set_guard_provider(self, provider: GuardProvider | None) -> None:
             self._guard_provider = provider
+        def _encrypt_password(self, keys: Any) -> str:
+            import rsa
+            publickey_exp = int(keys.publickey_exp, 16)
+            publickey_mod = int(keys.publickey_mod, 16)
+            public_key = rsa.PublicKey(n=publickey_mod, e=publickey_exp)
+            pwd = str(self._password or "")
+            try:
+                msg_bytes = pwd.encode("utf-8")
+            except Exception:
+                msg_bytes = pwd.encode("ascii", errors="replace")
+            encrypted_password = rsa.encrypt(message=msg_bytes, pub_key=public_key)
+            return str(base64.b64encode(encrypted_password), "utf8")
         async def is_authorized(self) -> bool:
             return await _safe_is_authorized(self)
         async def _begin_auth_session(
@@ -825,7 +884,7 @@ async def _try_import_qr_steam():
                 ]),
             )
             return CAuthentication_BeginAuthSessionViaQR_Response.FromString(response)
-        async def login_via_qr(self, display_cb: QRDisplay, poll_timeout: float = 180.0) -> str:
+        async def login_via_qr(self, display_cb: QRDisplay, poll_timeout: float = 180.0, confirmed_cb: Optional[Callable[[str], Awaitable[None]]] = None) -> str:
             if not self._requests.cookies().get("sessionid"):
                 await self._requests.bytes(method="GET", url="https://steamcommunity.com")
             qr = await self._begin_qr()
@@ -864,6 +923,11 @@ async def _try_import_qr_steam():
                     refresh_token = session.refresh_token
                     if session.account_name:
                         self.account_name = session.account_name
+                    if confirmed_cb:
+                        try:
+                            await confirmed_cb(self.account_name)
+                        except Exception:
+                            pass
                     break
             if not refresh_token:
                 raise QRLoginTimeout("QR-код не подтверждён (истекло время ожидания)")
@@ -1115,7 +1179,12 @@ class ProxyPool:
         return len(self._initial)
     def get_next(self) -> str | None:
         if not self._proxies:
-            return None
+            if self._initial:
+                logger.info(f"[ProxyPool] Все прокси временно исчерпали попытки. Восстанавливаем пул ({len(self._initial)} шт.) для повтора.")
+                self._proxies = list(self._initial)
+                self._failures.clear()
+            else:
+                return None
         p = self._proxies[self._idx % len(self._proxies)]
         self._idx += 1
         return p
@@ -1123,10 +1192,12 @@ class ProxyPool:
         if not proxy:
             return
         self._failures[proxy] = self._failures.get(proxy, 0) + 1
-        threshold = 2 if len(self._initial) <= 3 else 1
+        if len(self._initial) <= 1:
+            return
+        threshold = 3 if len(self._initial) <= 3 else 2
         if self._failures[proxy] >= threshold:
             try:
-                if proxy in self._proxies:
+                if proxy in self._proxies and len(self._proxies) > 1:
                     self._proxies.remove(proxy)
                     logger.warning(f"Прокси временно исключён из пула ({self._failures[proxy]} ошибок): {_mask_proxy(proxy)}")
             except ValueError:
@@ -1383,13 +1454,16 @@ async def process_one_account(
                     if _is_network_error(e):
                         proxy_pool.ban(proxy)
                         _log_event("account_proxy_error", level=logging.WARNING, login=login, proxy=masked_px, err=msg[:80])
+                        await asyncio.sleep(2.0)
                     else:
                         _log_event("account_steam_error", level=logging.WARNING, login=login, err=msg[:80])
+                        await asyncio.sleep(1.0)
                     last_status, last_error = RegionResult.FAIL_SESSION, msg
                     continue
                 if not await steam.is_authorized():
                     _log_event("account_not_authorized", level=logging.WARNING, login=login, attempt=attempt)
                     last_status = RegionResult.FAIL_SESSION
+                    await asyncio.sleep(1.0)
                     continue
                 try:
                     session_id = await _net(steam.sessionid, "store.steampowered.com", label=login)
@@ -1399,6 +1473,7 @@ async def process_one_account(
                     except Exception as e:
                         proxy_pool.ban(proxy)
                         _log_event("account_session_error", level=logging.WARNING, login=login, proxy=masked_px, err=str(e)[:80])
+                        await asyncio.sleep(2.0)
                         continue
                 result = await _region_change_core(steam, strategy, session_id, login, country_code)
                 if result is None:
@@ -1414,8 +1489,10 @@ async def process_one_account(
                 if _is_network_error(e):
                     proxy_pool.ban(proxy)
                     _log_event("account_net_error", level=logging.WARNING, login=login, proxy=masked_px, err=str(e)[:80])
+                    await asyncio.sleep(2.0)
                 else:
                     _log_event("account_error", level=logging.WARNING, login=login, err=str(e)[:80])
+                    await asyncio.sleep(1.0)
                 continue
             finally:
                 await strategy.close()
@@ -1431,6 +1508,7 @@ async def process_one_account_qr(
     gift_pool: "GiftCodePool | None" = None,
     poll_timeout: float = 180.0,
     begin_retries: int = 5,
+    confirmed_cb: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> AccountRegionResult:
     QRSteam = await _try_import_qr_steam()
     if QRSteam is None:
@@ -1440,7 +1518,7 @@ async def process_one_account_qr(
     steam = None
     account = None
     last_err: str | None = None
-    tries = max(1, min(len(proxy_pool) or 1, begin_retries))
+    tries = max(3, min(begin_retries, len(proxy_pool) * 2 if len(proxy_pool) else 3))
     for _ in range(tries):
         proxy = proxy_pool.get_next()
         if proxy is None:
@@ -1449,7 +1527,7 @@ async def process_one_account_qr(
         strategy = ProxyRequestStrategy(proxy)
         steam = QRSteam(login="qr_session", password="", request_strategy=strategy)
         try:
-            account = await steam.login_via_qr(display_cb, poll_timeout=poll_timeout)
+            account = await steam.login_via_qr(display_cb, poll_timeout=poll_timeout, confirmed_cb=confirmed_cb)
             break
         except asyncio.CancelledError:
             await strategy.close()
@@ -1474,6 +1552,7 @@ async def process_one_account_qr(
             if _is_network_error(e):
                 proxy_pool.ban(proxy)
                 logger.warning(f"[QR] ошибка прокси при начале сессии: {str(e)[:80]}")
+                await asyncio.sleep(2.0)
                 continue
             return AccountRegionResult("(qr)", RegionResult.ERROR, error=str(e))
     if strategy is None:
@@ -1694,18 +1773,37 @@ async def change_region_batch(
     return batch
 def parse_proxies(text: str) -> list[str]:
     proxies: list[str] = []
-    raw_tokens = re.split(r'[\r\n,;]+', text or "")
-    for raw in raw_tokens:
-        raw = raw.strip().strip("'\"` \t")
-        if not raw or raw.startswith("#"):
+    lines = (text or "").splitlines()
+    for raw_line in lines:
+        line = raw_line.strip().strip("'\"` \t")
+        if not line or line.startswith("#"):
             continue
-        for p in raw.split():
-            p = p.strip().strip("'\"` \t")
-            if not p or p.startswith("#"):
-                continue
-            norm = normalize_proxy_url(p)
-            if norm and norm not in proxies:
+
+        norm = normalize_proxy_url(line)
+        if norm:
+            if norm not in proxies:
                 proxies.append(norm)
+            continue
+
+        chunks = line.split()
+        if len(chunks) > 1:
+            for chunk in chunks:
+                chunk = chunk.strip().strip("'\"` \t,;")
+                if not chunk or chunk.startswith("#"):
+                    continue
+                cnorm = normalize_proxy_url(chunk)
+                if cnorm and cnorm not in proxies:
+                    proxies.append(cnorm)
+        else:
+
+            if "," in line:
+                for sub in line.split(","):
+                    sub = sub.strip().strip("'\"` \t")
+                    if not sub or sub.startswith("#"):
+                        continue
+                    snorm = normalize_proxy_url(sub)
+                    if snorm and snorm not in proxies:
+                        proxies.append(snorm)
     logger.info(f"[{NAME}] Распознано {len(proxies)} прокси из входного текста")
     return proxies
 def parse_gift_codes(text: str) -> list[str]:
@@ -1739,14 +1837,17 @@ _config_lock = threading.Lock()
 _waiting: dict[int, dict[str, Any]] = {}
 
 DEFAULT_BUYER_MESSAGES: dict[str, str] = {
+    "welcome_menu": (
+        "🎉 Оплата прошла успешно, спасибо за доверие!\n\n"
+        "Для быстрой и безопасной смены региона выберите способ авторизации:\n"
+        "1️⃣ По Логину и Паролю — напишите цифру 1\n"
+        "2️⃣ По QR-коду (без ввода данных) — напишите цифру 2\n\n"
+        "ℹ️ Если что-то пошло не так — напишите «заново» или «-», чтобы начать сначала."
+    ),
     "welcome": (
-        "👋 Здравствуйте, {buyer_username}!\n\n"
-        "Вы оформили заказ #{order_id} на смену региона Steam на {country_name}.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔹 Шаг 1 из 2: Логин аккаунта\n\n"
         "Пожалуйста, отправьте логин от вашего аккаунта Steam в этот чат:\n"
-        "(Или отправьте сразу «логин:пароль»)\n"
-        "━━━━━━━━━━━━━━━━━━━━━━"
+        "(Или отправьте сразу «логин:пароль»)"
     ),
     "ask_password": (
         "✅ Логин принят: {login}\n\n"
@@ -1754,6 +1855,24 @@ DEFAULT_BUYER_MESSAGES: dict[str, str] = {
         "🔹 Шаг 2 из 2: Пароль аккаунта\n\n"
         "Теперь отправьте пароль от вашего аккаунта Steam в этот чат:\n"
         "━━━━━━━━━━━━━━━━━━━━━━"
+    ),
+    "qr_ready_prompt": (
+        "Вы выбрали авторизацию по QR-коду. 📷\n\n"
+        "⚠️ Напишите + в чат, когда будете готовы открыть мобильное приложение Steam (Steam Guard → Сканер) и отсканировать код."
+    ),
+    "welcome_qr": (
+        "🛑 Отсканируйте и подтвердите вход в мобильном приложении Steam 🛑\n\n"
+        "🟢 Вхожу с веб-браузера\n"
+        "🟢 Локация — {country_name}\n\n"
+        "🔗 Прямая ссылка для входа:\n{challenge_url}"
+    ),
+    "qr_timeout": (
+        "⏳ QR-код истёк. Напишите 2 (или +) для нового QR-кода или 1 для входа по логину.\n\n"
+        "ℹ️ Если что-то пошло не так — напишите «заново» или «-», чтобы начать сначала."
+    ),
+    "qr_confirmed": (
+        "✅ Вход по QR подтверждён!\n\n"
+        "⏳ Продолжаем вход в аккаунт и смену региона на {country_name}..."
     ),
     "data_received": (
         "✅ Данные получены!\n\n"
@@ -1820,82 +1939,50 @@ DEFAULT_BUYER_MESSAGES: dict[str, str] = {
     ),
     "reminder_login": (
         "👋 Здравствуйте, {buyer_username}!\n\n"
-        "Напоминаем: для выполнения заказа #{order_id} по смене региона Steam на {country_name}, пожалуйста, отправьте логин от вашего аккаунта Steam в этот чат.\n"
-        "(Или отправьте сразу «логин:пароль»)"
+        "Напоминаем: для выполнения заказа #{order_id} по смене региона Steam на {country_name}, пожалуйста, выберите способ авторизации:\n"
+        "1 — по логину и паролю\n"
+        "2 — по QR-коду (или напишите «+» когда будете готовы)"
     ),
     "reminder_password": (
         "🔑 Напоминание по заказу #{order_id}!\n\n"
         "Мы всё ещё ожидаем пароль от вашего аккаунта Steam ({login}).\n"
         "Пожалуйста, отправьте пароль в этот чат для продолжения смены региона на {country_name}."
     ),
-        "reminder_guard": (
+    "reminder_guard": (
         "🔐 Напоминание по заказу #{order_id}!\n\n"
         "Для завершения авторизации в Steam ({login}) требуется проверочный код Steam Guard.\n"
         "Пожалуйста, проверьте мобильное приложение Steam или почту и отправьте проверочный код в этот чат."
     ),
-    "welcome_qr": (
-        "👋 Здравствуйте, {buyer_username}!\n\n"
-        "Вы оформили заказ #{order_id} на смену региона Steam на {country_name}.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔹 Выберите удобный способ входа:\n\n"
-        "Способ 1: Вход по QR-коду (быстро и безопасно)\n"
-        "1. Откройте мобильное приложение Steam на телефоне\n"
-        "2. Нажмите на значок щита (Steam Guard) → «Сканировать QR-код»\n"
-        "3. Отсканируйте отправленный выше QR-код и подтвердите вход\n"
-        "(Прямая ссылка: {challenge_url})\n\n"
-        "Способ 2: Вход по данным\n"
-        "Отправьте сообщением в этот чат: «логин:пароль» (или сначала логин)\n"
-        "━━━━━━━━━━━━━━━━━━━━━━"
-    ),
     "welcome_qr_choice": (
-        "👋 Здравствуйте, {buyer_username}!\n\n"
-        "Вы оформили заказ #{order_id} на смену региона Steam на {country_name}.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔹 Выберите удобный способ входа:\n\n"
-        "Способ 1: Вход по QR-коду (быстро и безопасно)\n"
-        "1. Откройте мобильное приложение Steam на телефоне\n"
-        "2. Нажмите на значок щита (Steam Guard) → «Сканировать QR-код»\n"
-        "3. Отсканируйте отправленный выше QR-код и подтвердите вход\n"
-        "(Прямая ссылка: {challenge_url})\n\n"
-        "Способ 2: Вход по данным\n"
-        "Отправьте сообщением в этот чат: «логин:пароль» (или сначала логин)\n"
-        "━━━━━━━━━━━━━━━━━━━━━━"
+        "🎉 Оплата прошла успешно, спасибо за доверие!\n\n"
+        "Для быстрой и безопасной смены региона выберите способ авторизации:\n"
+        "1️⃣ По Логину и Паролю — напишите цифру 1\n"
+        "2️⃣ По QR-коду (без ввода данных) — напишите цифру 2\n\n"
+        "ℹ️ Если что-то пошло не так — напишите «заново» или «-», чтобы начать сначала."
     ),
     "welcome_qr_only": (
-        "👋 Здравствуйте, {buyer_username}!\n\n"
-        "Вы оформили заказ #{order_id} на смену региона Steam на {country_name}.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📱 Вход через QR-код Steam Guard\n\n"
-        "1. Откройте мобильное приложение Steam на телефоне\n"
-        "2. Нажмите на значок щита (Steam Guard) и выберите «Сканировать QR-код»\n"
-        "3. Отсканируйте отправленный выше QR-код и подтвердите вход на телефоне\n\n"
-        "🔗 Прямая ссылка для входа:\n{challenge_url}\n\n"
-        "⏳ Бот ожидает подтверждения входа в приложении Steam...\n"
-        "━━━━━━━━━━━━━━━━━━━━━━"
-    ),
-    "qr_timeout": (
-        "⏱ Время действия QR-кода истекло!\n\n"
-        "Отправьте «qr» в этот чат для получения нового QR-кода,\n"
-        "либо отправьте данные для входа сообщением «логин:пароль»."
+        "Вы выбрали авторизацию по QR-коду. 📷\n\n"
+        "⚠️ Напишите + в чат, когда будете готовы открыть мобильное приложение Steam (Steam Guard → Сканер) и отсканировать код."
     ),
 }
 
 BUYER_MESSAGE_LABELS: dict[str, str] = {
-    "welcome": "👋 Шаг 1: Приветствие (запрос логина)",
-    "welcome_qr_choice": "🔄 QR или данные: Приветствие (на выбор)",
-    "welcome_qr_only": "📱 Только QR: Приветствие (строго QR)",
-    "welcome_qr": "📱 QR-код: Приветствие (универсальный)",
-    "qr_timeout": "⏱ QR-код: Истекло время ожидания",
+    "welcome_menu": "🎉 Выбор способа входа (1 или 2)",
+    "welcome": "🔹 Шаг 1: Запрос логина (или по цифре 1)",
     "ask_password": "🔑 Шаг 2: Запрос пароля",
-    "data_received": "⏳ Данные получены (старт)",
+    "qr_ready_prompt": "📷 Готовность к QR (запрос +)",
+    "welcome_qr": "🛑 Инструкция к QR-коду (с фото)",
+    "qr_timeout": "⏳ Тайм-аут QR-кода",
+    "qr_confirmed": "✅ Вход по QR подтверждён",
+    "data_received": "⏳ Данные приняты (старт смены)",
     "guard_request": "🔐 Запрос Steam Guard",
     "guard_retry": "⚠️ Повторный запрос Guard",
     "guard_push": "📱 Запрос подтверждения Push",
     "guard_received": "✅ Код Guard принят",
-    "success": "✅ Успешная смена региона",
-    "reminder_login": "🔔 Напоминание: ввод логина",
-    "reminder_password": "🔔 Напоминание: ввод пароля",
-    "reminder_guard": "🔔 Напоминание: ввод Guard-кода",
+    "success": "🎉 Успешная смена региона",
+    "reminder_login": "🔔 Напоминание при молчании",
+    "reminder_password": "🔑 Напоминание пароля",
+    "reminder_guard": "🔐 Напоминание кода Guard",
     "fixed_wallet_refund": "🛑 Были пополнения (автовозврат)",
     "fixed_wallet_no_refund": "🛑 Были пополнения (без автовозврата)",
     "no_proxies_refund": "⚠️ Закончились прокси (автовозврат)",
@@ -1905,11 +1992,14 @@ BUYER_MESSAGE_LABELS: dict[str, str] = {
 }
 
 BUYER_MESSAGE_HINTS: dict[str, str] = {
+    "welcome_menu": "Переменные: <code>{buyer_username}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
     "welcome": "Переменные: <code>{buyer_username}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
-    "welcome_qr_choice": "Переменные: <code>{buyer_username}</code>, <code>{country_name}</code>, <code>{order_id}</code>, <code>{challenge_url}</code>",
-    "welcome_qr_only": "Переменные: <code>{buyer_username}</code>, <code>{country_name}</code>, <code>{order_id}</code>, <code>{challenge_url}</code>",
-    "welcome_qr": "Переменные: <code>{buyer_username}</code>, <code>{country_name}</code>, <code>{order_id}</code>, <code>{challenge_url}</code>",
+    "qr_ready_prompt": "Переменные: <code>{buyer_username}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
+    "welcome_qr_choice": "Переменные: <code>{buyer_username}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
+    "welcome_qr_only": "Переменные: <code>{buyer_username}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
+    "welcome_qr": "Переменные: <code>{country_name}</code>, <code>{order_id}</code>, <code>{challenge_url}</code>",
     "qr_timeout": "Переменные: <code>{buyer_username}</code>, <code>{country_name}</code>, <code>{order_id}</code>, <code>{login}</code>",
+    "qr_confirmed": "Переменные: <code>{country_name}</code>, <code>{order_id}</code>, <code>{login}</code>",
     "ask_password": "Переменные: <code>{login}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
     "data_received": "Переменные: <code>{login}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
     "guard_request": "Переменные: <code>{login}</code>, <code>{order_id}</code>, <code>{guard_destination}</code>",
@@ -3723,7 +3813,10 @@ def _find_buyer_session(
             return None
         if len(matching) == 1:
             return matching[0]
-        input_waiting = [s for s in matching if s.get("step") in ("waiting_guard", "waiting_password", "waiting_login")]
+        input_waiting = [s for s in matching if s.get("step") in (
+            "waiting_choice", "waiting_qr_ready", "waiting_qr", "waiting_qr_timeout",
+            "waiting_qr_or_creds", "waiting_guard", "waiting_password", "waiting_login", "waiting_credentials"
+        )]
         if input_waiting:
             return input_waiting[0]
         return matching[-1]
@@ -3740,6 +3833,20 @@ def _is_valid_steam_login(s: str) -> bool:
     if any(c in val for c in ('@', '!', '?', ',', ';', '/', '\\', '|', '<', '>', '"', "'", '`', '(', ')', '[', ']', '{', '}', '#', '$', '%', '^', '&', '*', '=')):
         return False
     return True
+def _extract_creds_from_text(text: str) -> tuple[str, str] | None:
+    txt = (text or "").strip()
+    if not txt:
+        return None
+    if ":" in txt:
+        parts = txt.split(":", 1)
+        p0, p1 = parts[0].strip(), parts[1].strip()
+        if _is_valid_steam_login(p0) and p1:
+            return (p0, p1)
+    if "\n" in txt:
+        lines = [l.strip() for l in txt.splitlines() if l.strip()]
+        if len(lines) >= 2 and _is_valid_steam_login(lines[0]) and lines[1]:
+            return (lines[0], lines[1])
+    return None
 def _clean_funpay_text(text: str) -> str:
     s = re.sub(r'<[^>]+>', '', text)
     s = html.unescape(s)
@@ -4108,45 +4215,56 @@ def _process_incoming_order(cardinal, order, event=None, order_text: str = ""):
         )
         return
     qr_mode = _get_qr_mode(cfg)
-    if qr_mode in ("choice", "qr_only"):
-        sess = {
-            "order_id": oid,
-            "buyer_username": buyer_name,
-            "buyer_id": buyer_id,
-            "lot_id": str(lot_id),
-            "lot_cfg": lot_cfg,
-            "step": "waiting_qr",
-            "login_mode": qr_mode,
-            "cancel_qr_event": threading.Event(),
-            "chat_id": chat_id,
-            "country": country,
-            "proxies": proxies,
-            "created_at": time.time(),
-        }
-        _register_buyer_session(sess, buyer_id=buyer_id)
-        _mark_order_processed(oid)
-        _notify_tg(
-            f"🛒 <b>Новый заказ #{oid}</b>\n\n"
-            f"• Покупатель: <b>{buyer_name}</b>\n"
-            f"• Лот: <b>#{lot_id}</b> ({country_name})\n"
-            f"• Режим входа: <b>{_qr_mode_label(qr_mode)}</b>",
-            ntype="order"
-        )
-        threading.Thread(target=_run_qr_order_process, args=(cardinal, sess), daemon=True).start()
-        return
-
     sess = {
         "order_id": oid,
         "buyer_username": buyer_name,
         "buyer_id": buyer_id,
         "lot_id": str(lot_id),
         "lot_cfg": lot_cfg,
-        "step": "waiting_login",
+        "login_mode": qr_mode,
+        "cancel_qr_event": threading.Event(),
         "chat_id": chat_id,
         "country": country,
         "proxies": proxies,
         "created_at": time.time(),
     }
+
+    if qr_mode == "choice":
+        sess["step"] = "waiting_choice"
+        _register_buyer_session(sess, buyer_id=buyer_id)
+        _mark_order_processed(oid)
+        msg = _render_buyer_msg("welcome_menu", country_name=country_name, order_id=oid, buyer_username=buyer_name)
+        if not msg:
+            msg = _render_buyer_msg("welcome_qr_choice", country_name=country_name, order_id=oid, buyer_username=buyer_name)
+        _send_buyer_fp_msg(cardinal, chat_id, msg, buyer_username=buyer_name)
+        _log_event("order_welcome_menu_sent", order_id=oid, chat_id=chat_id, mode="choice")
+        _notify_tg(
+            f"🛒 <b>Новый заказ #{oid}</b>\n\n"
+            f"• Покупатель: <b>{buyer_name}</b>\n"
+            f"• Лот: <b>#{lot_id}</b> ({country_name})\n"
+            f"• Режим входа: <b>{_qr_mode_label(qr_mode)}</b> (ожидаем выбор 1 или 2)",
+            ntype="order"
+        )
+        return
+    elif qr_mode == "qr_only":
+        sess["step"] = "waiting_qr_ready"
+        _register_buyer_session(sess, buyer_id=buyer_id)
+        _mark_order_processed(oid)
+        msg = _render_buyer_msg("qr_ready_prompt", country_name=country_name, order_id=oid, buyer_username=buyer_name)
+        if not msg:
+            msg = _render_buyer_msg("welcome_qr_only", country_name=country_name, order_id=oid, buyer_username=buyer_name)
+        _send_buyer_fp_msg(cardinal, chat_id, msg, buyer_username=buyer_name)
+        _log_event("order_qr_ready_prompt_sent", order_id=oid, chat_id=chat_id, mode="qr_only")
+        _notify_tg(
+            f"🛒 <b>Новый заказ #{oid}</b>\n\n"
+            f"• Покупатель: <b>{buyer_name}</b>\n"
+            f"• Лот: <b>#{lot_id}</b> ({country_name})\n"
+            f"• Режим входа: <b>{_qr_mode_label(qr_mode)}</b> (ожидаем готовность «+»)",
+            ntype="order"
+        )
+        return
+
+    sess["step"] = "waiting_login"
     _register_buyer_session(sess, buyer_id=buyer_id)
     _mark_order_processed(oid)
     welcome_text = _render_buyer_msg(
@@ -4277,11 +4395,178 @@ def handle_new_message(cardinal, event, *args):
     oid = str(sess.get("order_id", ""))
     country_name = _country_display(sess.get("country", "KZ"))
     step = sess.get("step")
-    if step in ("waiting_qr", "waiting_qr_or_creds"):
-        raw_txt = msg_text.strip()
-        raw_low = raw_txt.lower()
+    raw_txt = msg_text.strip()
+    raw_low = raw_txt.lower()
+
+
+    if raw_low in ("заново", "-", "отмена", "start", "/start", "назад", "reset", "сначала"):
+        sess["canceled"] = True
         cancel_evt = sess.get("cancel_qr_event")
-        if raw_low in ("qr", "кьюар", "код", "обновить qr", "новый qr"):
+        if cancel_evt and isinstance(cancel_evt, threading.Event):
+            cancel_evt.set()
+        guard_evt = sess.get("guard_event")
+        if guard_evt and isinstance(guard_evt, threading.Event):
+            guard_evt.set()
+        sess.pop("canceled", None)
+        sess["cancel_qr_event"] = threading.Event()
+        sess.pop("login", None)
+        sess.pop("password", None)
+        sess.pop("guard_code", None)
+        login_mode = sess.get("login_mode", "choice")
+        if login_mode == "choice":
+            sess["step"] = "waiting_choice"
+            _register_buyer_session(sess)
+            msg = _render_buyer_msg("welcome_menu", country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username"))
+            if not msg:
+                msg = _render_buyer_msg("welcome_qr_choice", country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username"))
+            _send_buyer_fp_msg(cardinal, chat_id, f"🔄 Сессия сброшена.\n\n{msg}", buyer_username=sess.get("buyer_username"))
+            _log_event("order_session_reset", order_id=oid, mode="choice")
+            return
+        elif login_mode == "qr_only":
+            sess["step"] = "waiting_qr_ready"
+            _register_buyer_session(sess)
+            msg = _render_buyer_msg("qr_ready_prompt", country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username"))
+            if not msg:
+                msg = _render_buyer_msg("welcome_qr_only", country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username"))
+            _send_buyer_fp_msg(cardinal, chat_id, f"🔄 Сессия сброшена.\n\n{msg}", buyer_username=sess.get("buyer_username"))
+            _log_event("order_session_reset", order_id=oid, mode="qr_only")
+            return
+        else:
+            sess["step"] = "waiting_login"
+            _register_buyer_session(sess)
+            msg = _render_buyer_msg("welcome", country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username"))
+            _send_buyer_fp_msg(cardinal, chat_id, f"🔄 Сессия сброшена.\n\n{msg}", buyer_username=sess.get("buyer_username"))
+            _log_event("order_session_reset", order_id=oid, mode="login")
+            return
+
+    if step == "waiting_choice":
+        creds = _extract_creds_from_text(msg_text)
+        if creds:
+            sess["login"], sess["password"] = creds
+            sess["step"] = "processing"
+            _register_buyer_session(sess)
+            ack_msg = _render_buyer_msg("data_received", login=creds[0], country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username", ""))
+            _send_buyer_fp_msg(cardinal, chat_id, ack_msg, buyer_username=sess.get("buyer_username"))
+            _log_event("order_creds_received_from_menu", order_id=oid, login=creds[0])
+            _notify_tg(
+                f"⏳ <b>Заказ #{oid} взят в работу (вход по логину)</b>\n\n"
+                f"• Покупатель: <b>{sess.get('buyer_username', '?')}</b>\n"
+                f"• Логин Steam: <code>{creds[0]}</code>\n"
+                f"• Целевой регион: <b>{country_name}</b>",
+                ntype="order"
+            )
+            threading.Thread(target=_run_order_process, args=(cardinal, sess), daemon=True).start()
+            return
+
+        if raw_low in ("1", "1️⃣", "логин", "login", "пароль", "pass", "данные"):
+            sess["step"] = "waiting_login"
+            _register_buyer_session(sess)
+            w_msg = _render_buyer_msg("welcome", country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username", ""))
+            _send_buyer_fp_msg(cardinal, chat_id, w_msg, buyer_username=sess.get("buyer_username"))
+            _log_event("order_choice_login_selected", order_id=oid)
+            return
+
+        if raw_low in ("2", "2️⃣", "qr", "кьюар", "кьюар код", "код", "qr код"):
+            sess["step"] = "waiting_qr_ready"
+            _register_buyer_session(sess)
+            q_msg = _render_buyer_msg("qr_ready_prompt", country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username", ""))
+            if not q_msg:
+                q_msg = _render_buyer_msg("welcome_qr_only", country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username", ""))
+            _send_buyer_fp_msg(cardinal, chat_id, q_msg, buyer_username=sess.get("buyer_username"))
+            _log_event("order_choice_qr_selected", order_id=oid)
+            return
+
+        if raw_low in ("+", "++", "готов", "го", "давай", "сканирую"):
+            cancel_evt = sess.get("cancel_qr_event")
+            if cancel_evt and isinstance(cancel_evt, threading.Event):
+                cancel_evt.set()
+            sess["cancel_qr_event"] = threading.Event()
+            sess["step"] = "waiting_qr"
+            _register_buyer_session(sess)
+            _send_buyer_fp_msg(cardinal, chat_id, "🔄 Генерируем QR-код для входа...", buyer_username=sess.get("buyer_username"))
+            _log_event("order_qr_started_from_menu_plus", order_id=oid)
+            threading.Thread(target=_run_qr_order_process, args=(cardinal, sess), daemon=True).start()
+            return
+
+        if _is_valid_steam_login(raw_txt) and len(raw_txt) >= 3:
+            sess["login"] = raw_txt
+            sess["step"] = "waiting_password"
+            sess["login_time"] = time.time()
+            _register_buyer_session(sess)
+            ask_pwd = _render_buyer_msg("ask_password", login=raw_txt, country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username", ""))
+            _send_buyer_fp_msg(cardinal, chat_id, ask_pwd, buyer_username=sess.get("buyer_username"))
+            _log_event("order_login_received_from_menu", order_id=oid, login=raw_txt)
+            return
+
+        hint = (
+            "Пожалуйста, выберите способ авторизации:\n\n"
+            "1️⃣ По Логину и Паролю — напишите цифру 1\n"
+            "2️⃣ По QR-коду — напишите цифру 2\n\n"
+            "ℹ️ Если что-то пошло не так — напишите «заново» или «-», чтобы сбросить выбор."
+        )
+        _send_buyer_fp_msg(cardinal, chat_id, hint, buyer_username=sess.get("buyer_username"))
+        return
+
+    elif step == "waiting_qr_ready":
+        creds = _extract_creds_from_text(msg_text)
+        if creds:
+            sess["login"], sess["password"] = creds
+            sess["step"] = "processing"
+            _register_buyer_session(sess)
+            ack_msg = _render_buyer_msg("data_received", login=creds[0], country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username", ""))
+            _send_buyer_fp_msg(cardinal, chat_id, ack_msg, buyer_username=sess.get("buyer_username"))
+            _log_event("order_creds_received_from_qr_ready", order_id=oid, login=creds[0])
+            _notify_tg(
+                f"⏳ <b>Заказ #{oid} взят в работу (вход по логину)</b>\n\n"
+                f"• Покупатель: <b>{sess.get('buyer_username', '?')}</b>\n"
+                f"• Логин Steam: <code>{creds[0]}</code>\n"
+                f"• Целевой регион: <b>{country_name}</b>",
+                ntype="order"
+            )
+            threading.Thread(target=_run_order_process, args=(cardinal, sess), daemon=True).start()
+            return
+
+        if raw_low in ("+", "++", "готов", "го", "давай", "сканирую", "2", "2️⃣", "qr", "кьюар"):
+            cancel_evt = sess.get("cancel_qr_event")
+            if cancel_evt and isinstance(cancel_evt, threading.Event):
+                cancel_evt.set()
+            sess["cancel_qr_event"] = threading.Event()
+            sess["step"] = "waiting_qr"
+            _register_buyer_session(sess)
+            _send_buyer_fp_msg(cardinal, chat_id, "🔄 Генерируем QR-код для входа...", buyer_username=sess.get("buyer_username"))
+            _log_event("order_qr_started_after_ready", order_id=oid)
+            threading.Thread(target=_run_qr_order_process, args=(cardinal, sess), daemon=True).start()
+            return
+
+        if raw_low in ("1", "1️⃣", "логин", "пароль"):
+            sess["step"] = "waiting_login"
+            _register_buyer_session(sess)
+            w_msg = _render_buyer_msg("welcome", country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username", ""))
+            _send_buyer_fp_msg(cardinal, chat_id, w_msg, buyer_username=sess.get("buyer_username"))
+            _log_event("order_switched_from_qr_ready_to_login", order_id=oid)
+            return
+
+        if _is_valid_steam_login(raw_txt) and len(raw_txt) >= 3:
+            sess["login"] = raw_txt
+            sess["step"] = "waiting_password"
+            sess["login_time"] = time.time()
+            _register_buyer_session(sess)
+            ask_pwd = _render_buyer_msg("ask_password", login=raw_txt, country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username", ""))
+            _send_buyer_fp_msg(cardinal, chat_id, ask_pwd, buyer_username=sess.get("buyer_username"))
+            _log_event("order_login_received_from_qr_ready", order_id=oid, login=raw_txt)
+            return
+
+        hint = (
+            "📷 Ожидаем вашей готовности к сканированию QR-кода.\n\n"
+            "Как только откроете мобильное приложение Steam (Steam Guard → Сканер) — отправьте «+» (плюс) в этот чат для получения QR-кода.\n"
+            "(Или отправьте «1», чтобы войти по логину и паролю)"
+        )
+        _send_buyer_fp_msg(cardinal, chat_id, hint, buyer_username=sess.get("buyer_username"))
+        return
+
+    elif step in ("waiting_qr", "waiting_qr_timeout", "waiting_qr_or_creds"):
+        cancel_evt = sess.get("cancel_qr_event")
+        if raw_low in ("+", "++", "2", "2️⃣", "qr", "кьюар", "код", "обновить qr", "новый qr", "еще qr", "ещё qr", "готов", "давай"):
             if cancel_evt and isinstance(cancel_evt, threading.Event):
                 cancel_evt.set()
             sess["cancel_qr_event"] = threading.Event()
@@ -4292,17 +4577,7 @@ def handle_new_message(cardinal, event, *args):
             threading.Thread(target=_run_qr_order_process, args=(cardinal, sess), daemon=True).start()
             return
 
-        creds = None
-        if ":" in msg_text:
-            parts = msg_text.split(":", 1)
-            p0, p1 = parts[0].strip(), parts[1].strip()
-            if _is_valid_steam_login(p0) and p1:
-                creds = (p0, p1)
-        elif "\n" in msg_text:
-            lines = [l.strip() for l in msg_text.splitlines() if l.strip()]
-            if len(lines) >= 2 and _is_valid_steam_login(lines[0]) and lines[1]:
-                creds = (lines[0], lines[1])
-
+        creds = _extract_creds_from_text(msg_text)
         if creds:
             if cancel_evt and isinstance(cancel_evt, threading.Event):
                 cancel_evt.set()
@@ -4328,6 +4603,16 @@ def handle_new_message(cardinal, event, *args):
             threading.Thread(target=_run_order_process, args=(cardinal, sess), daemon=True).start()
             return
 
+        if raw_low in ("1", "1️⃣", "логин", "пароль"):
+            if cancel_evt and isinstance(cancel_evt, threading.Event):
+                cancel_evt.set()
+            sess["step"] = "waiting_login"
+            _register_buyer_session(sess)
+            w_msg = _render_buyer_msg("welcome", country_name=country_name, order_id=oid, buyer_username=sess.get("buyer_username", ""))
+            _send_buyer_fp_msg(cardinal, chat_id, w_msg, buyer_username=sess.get("buyer_username"))
+            _log_event("order_switched_from_qr_to_login", order_id=oid)
+            return
+
         login_val = raw_txt
         if _is_valid_steam_login(login_val) and len(login_val) >= 3 and raw_low not in ("qr", "help"):
             if cancel_evt and isinstance(cancel_evt, threading.Event):
@@ -4347,24 +4632,25 @@ def handle_new_message(cardinal, event, *args):
             _log_event("order_login_received_from_qr", order_id=oid, login=login_val)
             return
 
-        hint_msg = (
-            "📱 Бот ожидает подтверждения входа через QR-код в мобильном приложении Steam.\n\n"
-            "• Чтобы получить новый QR-код, отправьте: «qr»\n"
-            "• Чтобы войти по логину и паролю, отправьте данные сообщением: «логин:пароль»"
-        )
+        if step == "waiting_qr":
+            hint_msg = (
+                "📱 Бот ожидает подтверждения входа через QR-код в мобильном приложении Steam.\n\n"
+                "• Чтобы получить новый QR-код, отправьте: «+» или «qr»\n"
+                "• Чтобы войти по логину и паролю, отправьте «1» (или данные «логин:пароль»)\n"
+                "• Напишите «заново» или «-», чтобы начать сначала"
+            )
+        else:
+            hint_msg = (
+                "⏳ Время действия QR-кода истекло.\n\n"
+                "• Чтобы получить новый QR-код, отправьте «+» или «2»\n"
+                "• Чтобы войти по логину и паролю, отправьте «1» (или данные «логин:пароль»)\n"
+                "• Напишите «заново» или «-», чтобы начать сначала"
+            )
         _send_buyer_fp_msg(cardinal, chat_id, hint_msg, buyer_username=sess.get("buyer_username"))
         return
+
     elif step in ("waiting_login", "waiting_credentials"):
-        creds = None
-        if ":" in msg_text:
-            parts = msg_text.split(":", 1)
-            p0, p1 = parts[0].strip(), parts[1].strip()
-            if _is_valid_steam_login(p0) and p1:
-                creds = (p0, p1)
-        elif "\n" in msg_text:
-            lines = [l.strip() for l in msg_text.splitlines() if l.strip()]
-            if len(lines) >= 2 and _is_valid_steam_login(lines[0]) and lines[1]:
-                creds = (lines[0], lines[1])
+        creds = _extract_creds_from_text(msg_text)
         if creds:
             sess["login"], sess["password"] = creds
             sess["step"] = "processing"
@@ -4576,24 +4862,28 @@ def _run_qr_order_process(cardinal, sess):
             except Exception as e:
                 logger.warning(f"[{NAME}] Ошибка генерации QR-изображения: {e}")
 
-            tmpl_key = "welcome_qr_only" if sess.get("login_mode") == "qr_only" else "welcome_qr_choice"
             msg_qr = _render_buyer_msg(
-                tmpl_key,
+                "welcome_qr",
                 country_name=country_name,
                 order_id=oid,
                 buyer_username=buyer_user,
                 challenge_url=challenge_url
             )
-            if not msg_qr:
-                msg_qr = _render_buyer_msg(
-                    "welcome_qr",
-                    country_name=country_name,
-                    order_id=oid,
-                    buyer_username=buyer_user,
-                    challenge_url=challenge_url
-                )
             _send_buyer_fp_msg(cardinal, chat_id, msg_qr, buyer_username=buyer_user)
             _log_event("order_qr_welcome_sent", order_id=oid, chat_id=chat_id, img_sent=qr_sent)
+
+        async def _confirmed_cb(login_name: str):
+            c_msg = _render_buyer_msg(
+                "qr_confirmed",
+                country_name=country_name,
+                order_id=oid,
+                buyer_username=buyer_user,
+                login=login_name or ""
+            )
+            if not c_msg:
+                c_msg = f"✅ Вход по QR подтверждён!\n\n⏳ Продолжаем вход в аккаунт и смену региона на {country_name}..."
+            _send_buyer_fp_msg(cardinal, chat_id, c_msg, buyer_username=buyer_user)
+            _log_event("order_qr_confirmed", order_id=oid, login=login_name)
 
         res = await process_one_account_qr(
             proxy_pool=proxy_pool,
@@ -4601,9 +4891,10 @@ def _run_qr_order_process(cardinal, sess):
             display_cb=_display_cb,
             gift_pool=gift_pool,
             poll_timeout=180.0,
+            confirmed_cb=_confirmed_cb,
         )
 
-        if cancel_evt.is_set():
+        if cancel_evt.is_set() or sess.get("canceled"):
             if reserved_gift:
                 _release_gift_code(reserved_gift)
             return
@@ -4662,7 +4953,7 @@ def _run_qr_order_process(cardinal, sess):
                 or "code': 9" in err_str
                 or "code': 42" in err_str
             ):
-                sess["step"] = "waiting_qr_or_creds"
+                sess["step"] = "waiting_qr_timeout"
                 sess["timeout_qr_time"] = time.time()
                 _register_buyer_session(sess)
                 t_msg = _render_buyer_msg(
@@ -4677,7 +4968,7 @@ def _run_qr_order_process(cardinal, sess):
                 _notify_tg(
                     f"⏱ <b>Заказ #{oid} · Время действия QR-кода истекло</b>\n\n"
                     f"• Покупатель: <b>{buyer_user or '?'}</b>\n"
-                    f"• Статус: бот ожидает ввода «qr» для повтора или «логин:пароль».",
+                    f"• Статус: бот ожидает ввода «+» / «2» для повтора или «1» для логина.",
                     ntype="order"
                 )
                 return
@@ -4838,22 +5129,30 @@ def _run_order_process(cardinal, sess):
                             buyer_username=buyer_user
                         )
                         got = await asyncio.get_event_loop().run_in_executor(None, lambda: sess["guard_event"].wait(timeout=330))
+                if sess.get("canceled"):
+                    return ""
                 if got:
                     code = sess.get("guard_code", "")
                     sess["step"] = "processing"
                     _log_event("order_guard_received", order_id=oid, login=login)
                     return code
+                if sess.get("canceled"):
+                    return ""
                 sess["step"] = "paused_silent"
                 sess["is_silent_guard"] = True
                 _log_event("order_guard_timeout_silent", level=logging.WARNING, order_id=oid, login=login)
                 return ""
             else:
                 got = await asyncio.get_event_loop().run_in_executor(None, lambda: sess["guard_event"].wait(timeout=600))
+                if sess.get("canceled"):
+                    return ""
                 if got:
                     code = sess.get("guard_code", "")
                     sess["step"] = "processing"
                     _log_event("order_guard_received", order_id=oid, login=login)
                     return code
+                if sess.get("canceled"):
+                    return ""
                 sess["step"] = "failed"
                 _log_event("order_guard_timeout", level=logging.WARNING, order_id=oid, login=login)
                 return ""
@@ -4868,6 +5167,11 @@ def _run_order_process(cardinal, sess):
             gift_pool=gift_pool,
             guard_provider=_guard_cb,
         )
+        if sess.get("canceled"):
+            if reserved_gift:
+                _release_gift_code(reserved_gift)
+            logger.info(f"[{NAME}] Заказ #{oid} был сброшен/отменён покупателем, прерываем выполнение.")
+            return
         if reserved_gift:
             if res.is_success and res.gift_redeemed:
                 _commit_gift_code(reserved_gift)
