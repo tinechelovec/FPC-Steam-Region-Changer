@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 _REQUIRED_PACKAGES = [
     ("aiohttp", "aiohttp"),
@@ -145,7 +146,7 @@ try:
 except Exception:
     tg_types = None
 NAME = "Steam Region Changer"
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 DESCRIPTION = "Смена региона Steam (Steam Region Changer)"
 CREDITS = "@tinechelovec"
 UUID = "001ab503-775a-41c2-8b96-4207daaf33a7"
@@ -187,10 +188,107 @@ URL_ACCOUNT = "https://store.steampowered.com/account/"
 RATE_LIMIT_DELAY = 30
 
 MAX_PROXY_ATTEMPTS_FLOOR = 10
+REGION_ATTEMPTS_PER_PROXY = max(1, int(os.getenv("SRC_ATTEMPTS_PER_PROXY", "2")))
+REGION_MAX_TOTAL_ATTEMPTS = max(2, int(os.getenv("SRC_MAX_TOTAL_ATTEMPTS", "6")))
 
 GIFT_MAX_PROXY_ATTEMPTS = 3
 
 _RETRYABLE_HTTP = {503, 502, 504, 429, 520, 521, 522, 523, 524}
+
+_EVENT_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, int(os.getenv("SRC_EVENT_WORKERS", "3"))),
+    thread_name_prefix="SRC-EVENT",
+)
+_ORDER_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, int(os.getenv("SRC_ORDER_WORKERS", "4"))),
+    thread_name_prefix="SRC-ORDER",
+)
+_EVENT_JOBS: dict[str, Any] = {}
+_ORDER_JOBS: dict[str, Any] = {}
+_EVENT_JOBS_LOCK = threading.Lock()
+_ORDER_JOBS_LOCK = threading.Lock()
+_CHAT_EVENT_LOCKS: dict[str, threading.RLock] = {}
+_CHAT_EVENT_LOCKS_LOCK = threading.Lock()
+
+def _get_chat_event_lock(key: str) -> threading.RLock:
+    key = str(key or "global")
+    with _CHAT_EVENT_LOCKS_LOCK:
+        lock = _CHAT_EVENT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _CHAT_EVENT_LOCKS[key] = lock
+        return lock
+
+def _run_serialized_event(serial_key: str, fn, *args, **kwargs):
+    lock = _get_chat_event_lock(serial_key)
+    with lock:
+        return fn(*args, **kwargs)
+
+def _event_chat_key(event, order=None) -> str:
+    chat_obj = getattr(event, "chat", None)
+    for obj in (order, getattr(event, "order", None), getattr(event, "message", None), chat_obj, event):
+        if obj is None:
+            continue
+        cid = getattr(obj, "chat_id", None)
+        if cid is None and obj is chat_obj:
+            cid = getattr(obj, "id", None)
+        if cid is not None and str(cid).strip():
+            return f"chat:{cid}"
+    return "global"
+
+def _message_event_identity(event) -> str:
+    msg = getattr(event, "message", None)
+    chat = getattr(event, "chat", None)
+    mid = getattr(msg, "id", None) or getattr(chat, "node_msg_id", None) or getattr(chat, "user_msg_id", None)
+    if mid is not None:
+        return str(mid)
+    txt = str(
+        getattr(msg, "text", "")
+        or getattr(msg, "content", "")
+        or getattr(chat, "last_message_text", "")
+        or getattr(event, "text", "")
+        or getattr(event, "last_message_text", "")
+        or getattr(event, "content", "")
+        or ""
+    )
+    return str(abs(hash(txt))) if txt else str(id(event))
+
+def _schedule_limited_job(executor, registry: dict[str, Any], registry_lock: threading.Lock, key: str, fn, *args, **kwargs) -> bool:
+    with registry_lock:
+        old = registry.get(key)
+        if old is not None and not old.done():
+            return False
+        try:
+            fut = executor.submit(fn, *args, **kwargs)
+        except RuntimeError:
+            return False
+        registry[key] = fut
+        def _cleanup(done_fut):
+            with registry_lock:
+                if registry.get(key) is done_fut:
+                    registry.pop(key, None)
+            try:
+                exc = done_fut.exception()
+                if exc is not None:
+                    logger.error(f"{LP} background job failed key={key}: {exc}", exc_info=(type(exc), exc, exc.__traceback__))
+            except Exception:
+                pass
+        fut.add_done_callback(_cleanup)
+        return True
+
+def _schedule_event_job(key: str, fn, *args, **kwargs) -> bool:
+    return _schedule_limited_job(_EVENT_EXECUTOR, _EVENT_JOBS, _EVENT_JOBS_LOCK, key, fn, *args, **kwargs)
+
+def _schedule_order_worker(cardinal, sess: dict[str, Any], mode: str = "login") -> bool:
+    oid = str(sess.get("order_id") or "noid").strip().lstrip("#")
+    key = f"{oid}:{mode}"
+    fn = _run_qr_order_process if mode == "qr" else _run_order_process
+    scheduled = _schedule_limited_job(_ORDER_EXECUTOR, _ORDER_JOBS, _ORDER_JOBS_LOCK, key, fn, cardinal, sess)
+    if not scheduled:
+        _log_event("order_job_busy", level=logging.DEBUG, order_id=oid, mode=mode)
+    else:
+        _log_event("order_job_scheduled", level=logging.DEBUG, order_id=oid, mode=mode)
+    return scheduled
 
 def format_eta(seconds: float) -> str:
     s = max(0, int(round(seconds)))
@@ -694,19 +792,17 @@ async def _try_import_manual_steam():
             )
             if not getattr(auth_session, "client_id", None):
                 raise SteamLoginFailed("Не удалось получить сессию Steam (неверный логин или пароль)")
-            has_email = EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode in c_types
-            has_machine = 6 in c_types
+            has_email = any(getattr(c, "confirmation_type", None) in (2, 5, getattr(EAuthSessionGuardType, 'k_EAuthSessionGuardType_EmailCode', 2), getattr(EAuthSessionGuardType, 'k_EAuthSessionGuardType_EmailConfirmation', 5)) for c in getattr(auth_session, "allowed_confirmations", []))
+            has_machine = any(getattr(c, "confirmation_type", None) in (6, getattr(EAuthSessionGuardType, 'k_EAuthSessionGuardType_MachineToken', 6)) for c in getattr(auth_session, "allowed_confirmations", []))
             if has_email or has_machine:
                 try:
-                    from aiohttp import FormData
-                    check_data = FormData(fields=[
-                        ("clientid", str(auth_session.client_id)),
-                        ("steamid", str(auth_session.steamid)),
-                    ])
                     await self._requests.bytes(
                         method="POST",
                         url="https://login.steampowered.com/jwt/checkdevice",
-                        data=check_data,
+                        data={
+                            "clientid": str(auth_session.client_id),
+                            "steamid": str(auth_session.steamid),
+                        },
                         headers={
                             "Origin": "https://steamcommunity.com",
                             "Referer": "https://steamcommunity.com",
@@ -728,22 +824,23 @@ async def _try_import_manual_steam():
                     if c_type in (
                         EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceCode,
                         EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode,
+                        2, 3, 5,
                     ):
                         twofactor_conf = conf
-                        if c_type == EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode:
+                        if c_type in (EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode, 2, 5):
                             guard_type_str = "email"
                             guard_detail_str = getattr(conf, "associated_message", "") or ""
-                        elif c_type == EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceCode:
+                        elif c_type in (EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceCode, 3):
                             guard_type_str = "device"
                             guard_detail_str = getattr(conf, "associated_message", "") or ""
                         break
-                    elif c_type == EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceConfirmation:
+                    elif c_type in (EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceConfirmation, 4):
                         has_mobile_push = True
                 if twofactor_conf:
                     twofactor_requested = True
                     c_type = getattr(twofactor_conf, "confirmation_type", None)
                     code_type = EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceCode
-                    if c_type == EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode:
+                    if c_type in (EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode, 2, 5):
                         code_type = EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode
                     poll_interval = max(2, int(getattr(auth_session, "interval", 3) or 3))
                     for code_attempt in range(1, 4):
@@ -774,12 +871,10 @@ async def _try_import_manual_steam():
                         except SteamError as e:
                             err_code = getattr(e, "error_code", None)
                             logger.warning(f"[{self._login}] Steam отклонил Guard-код (код ошибки {err_code}): {e}")
-                            if err_code in (65, 88):
-                                if code_attempt < 3:
-                                    continue
-                                else:
-                                    raise GuardCodeRejected("Guard-код не принят Steam (неверный код)")
-                            raise
+                            if code_attempt < 3:
+                                continue
+                            else:
+                                raise GuardCodeRejected(f"Guard-код не принят Steam (код ошибки {err_code})")
                         for _poll_i in range(12):
                             await asyncio.sleep(poll_interval)
                             try:
@@ -798,6 +893,8 @@ async def _try_import_manual_steam():
                             logger.warning(f"[{self._login}] Refresh token не получен после polling (попытка {code_attempt}/3)")
                             if code_attempt < 3:
                                 continue
+                            else:
+                                raise GuardCodeRejected("Guard-код не принят Steam (не получен refresh_token)")
                 elif has_mobile_push:
                     if self._guard_provider is not None:
                         try:
@@ -1179,12 +1276,7 @@ class ProxyPool:
         return len(self._initial)
     def get_next(self) -> str | None:
         if not self._proxies:
-            if self._initial:
-                logger.info(f"[ProxyPool] Все прокси временно исчерпали попытки. Восстанавливаем пул ({len(self._initial)} шт.) для повтора.")
-                self._proxies = list(self._initial)
-                self._failures.clear()
-            else:
-                return None
+            return None
         p = self._proxies[self._idx % len(self._proxies)]
         self._idx += 1
         return p
@@ -1192,13 +1284,15 @@ class ProxyPool:
         if not proxy:
             return
         self._failures[proxy] = self._failures.get(proxy, 0) + 1
-        if len(self._initial) <= 1:
-            return
-        threshold = 3 if len(self._initial) <= 3 else 2
+        threshold = 2
         if self._failures[proxy] >= threshold:
             try:
-                if proxy in self._proxies and len(self._proxies) > 1:
+                if proxy in self._proxies:
                     self._proxies.remove(proxy)
+                    if self._proxies:
+                        self._idx %= len(self._proxies)
+                    else:
+                        self._idx = 0
                     logger.warning(f"Прокси временно исключён из пула ({self._failures[proxy]} ошибок): {_mask_proxy(proxy)}")
             except ValueError:
                 pass
@@ -1354,7 +1448,8 @@ async def process_one_account(
         if max_attempts_override is not None:
             max_attempts = max(1, max_attempts_override)
         else:
-            max_attempts = max(len(proxy_pool) * 3, MAX_PROXY_ATTEMPTS_FLOOR)
+            proxy_count = max(1, proxy_pool.total_configured)
+            max_attempts = min(REGION_MAX_TOTAL_ATTEMPTS, max(2, proxy_count * REGION_ATTEMPTS_PER_PROXY))
         last_status = RegionResult.FAIL_CHANGE
         last_error: str | None = None
         guard_rejections = 0
@@ -1518,7 +1613,7 @@ async def process_one_account_qr(
     steam = None
     account = None
     last_err: str | None = None
-    tries = max(3, min(begin_retries, len(proxy_pool) * 2 if len(proxy_pool) else 3))
+    tries = min(begin_retries, max(2, max(1, proxy_pool.total_configured) * 2))
     for _ in range(tries):
         proxy = proxy_pool.get_next()
         if proxy is None:
@@ -3718,6 +3813,45 @@ def _handle_waiting_message(message):
 _buyer_sessions: dict[Any, dict[str, Any]] = {}
 _active_sessions: list[dict[str, Any]] = []
 _sessions_lock = threading.Lock()
+_terminated_orders: set[str] = set()
+_terminated_orders_lock = threading.Lock()
+
+def _terminate_buyer_session(order_id: Any, reason: str = "", *, chat_id: Any = None) -> bool:
+    if not order_id:
+        return False
+    oid = str(order_id).strip().lstrip('#')
+    with _terminated_orders_lock:
+        _terminated_orders.add(oid)
+
+    terminated_any = False
+    with _sessions_lock:
+        to_del = [k for k, v in _buyer_sessions.items() if str(v.get("order_id") or "").strip().lstrip('#') == oid]
+        matched_sessions = [s for s in _active_sessions if str(s.get("order_id") or "").strip().lstrip('#') == oid]
+        for s in matched_sessions:
+            s["canceled"] = True
+            s["step"] = "finished"
+            c_evt = s.get("cancel_qr_event")
+            if c_evt and isinstance(c_evt, threading.Event):
+                c_evt.set()
+            g_evt = s.get("guard_event")
+            if g_evt and isinstance(g_evt, threading.Event):
+                g_evt.set()
+            terminated_any = True
+
+        for k in to_del:
+            _buyer_sessions.pop(k, None)
+        _active_sessions[:] = [s for s in _active_sessions if str(s.get("order_id") or "").strip().lstrip('#') != oid]
+
+        if chat_id is not None:
+            to_del_chat = [
+                k for k, v in _buyer_sessions.items()
+                if str(v.get("chat_id") or "") == str(chat_id) and str(v.get("order_id") or "").strip().lstrip('#') == oid
+            ]
+            for k in to_del_chat:
+                _buyer_sessions.pop(k, None)
+
+    _log_event("session_terminated", order_id=oid, reason=reason)
+    return terminated_any
 
 def _extract_session_keys(sess: dict[str, Any]) -> set[Any]:
     keys: set[Any] = set()
@@ -3753,14 +3887,18 @@ def _extract_session_keys(sess: dict[str, Any]) -> set[Any]:
 def _register_buyer_session(sess: dict[str, Any], buyer_id: Any = None) -> None:
     if buyer_id is not None:
         sess["buyer_id"] = buyer_id
+    oid = str(sess.get("order_id") or "").strip().lstrip('#')
+    if oid:
+        with _terminated_orders_lock:
+            _terminated_orders.discard(oid)
     with _sessions_lock:
-        oid = str(sess.get("order_id") or "")
+        raw_oid = str(sess.get("order_id") or "")
         _active_sessions[:] = [
             s for s in _active_sessions
-            if str(s.get("order_id") or "") != oid and s.get("step") not in ("finished", "refunded", "failed_closed")
+            if str(s.get("order_id") or "") != raw_oid and s.get("step") not in ("finished", "refunded", "failed_closed")
         ]
         _active_sessions.append(sess)
-        to_del = [k for k, v in _buyer_sessions.items() if str(v.get("order_id") or "") == oid]
+        to_del = [k for k, v in _buyer_sessions.items() if str(v.get("order_id") or "") == raw_oid]
         for k in to_del:
             _buyer_sessions.pop(k, None)
         for k in _extract_session_keys(sess):
@@ -3775,6 +3913,9 @@ def _find_buyer_session(
     with _sessions_lock:
         if order_id:
             target_oid = str(order_id).strip().lstrip('#')
+            with _terminated_orders_lock:
+                if target_oid in _terminated_orders:
+                    return None
             for s in _active_sessions:
                 if str(s.get("order_id") or "").strip().lstrip('#') == target_oid:
                     if s.get("step") not in ("finished", "refunded", "failed_closed"):
@@ -3806,6 +3947,10 @@ def _find_buyer_session(
         for s in _active_sessions:
             if s.get("step") in ("finished", "refunded", "failed_closed"):
                 continue
+            s_oid = str(s.get("order_id") or "").strip().lstrip('#')
+            with _terminated_orders_lock:
+                if s_oid in _terminated_orders:
+                    continue
             s_keys = _extract_session_keys(s)
             if any(cand in s_keys for cand in candidates):
                 matching.append(s)
@@ -3846,6 +3991,48 @@ def _extract_creds_from_text(text: str) -> tuple[str, str] | None:
         lines = [l.strip() for l in txt.splitlines() if l.strip()]
         if len(lines) >= 2 and _is_valid_steam_login(lines[0]) and lines[1]:
             return (lines[0], lines[1])
+    return None
+
+_CYRILLIC_TO_LATIN_HOMOGLYPHS = {
+    'А': 'A', 'а': 'A',
+    'В': 'B', 'в': 'B',
+    'С': 'C', 'с': 'C',
+    'Е': 'E', 'е': 'E',
+    'Н': 'H', 'н': 'H',
+    'К': 'K', 'к': 'K',
+    'М': 'M', 'м': 'M',
+    'О': 'O', 'о': 'O',
+    'Р': 'P', 'р': 'P',
+    'Т': 'T', 'т': 'T',
+    'Х': 'X', 'х': 'X',
+    'У': 'Y', 'у': 'Y',
+}
+
+def _normalize_guard_string(s: str) -> str:
+    return ''.join(_CYRILLIC_TO_LATIN_HOMOGLYPHS.get(c, c) for c in (s or ""))
+
+def _extract_guard_code(text: str) -> str | None:
+    txt = (text or "").strip()
+    if not txt:
+        return None
+    clean_pure = re.sub(r'[^A-Za-z0-9]', '', txt).upper()
+    if len(clean_pure) == 5:
+        return clean_pure
+    norm_txt = _normalize_guard_string(txt)
+    clean_norm = re.sub(r'[^A-Za-z0-9]', '', norm_txt).upper()
+    if len(clean_norm) == 5:
+        return clean_norm
+    ignore_tokens = {
+        "STEAM", "GUARD", "ENTER", "HELLO", "CHECK", "LOGIN", "RESET", "AGAIN",
+        "READY", "START", "ADMIN", "TOKEN", "ORDER", "EMAIL", "PHONE", "CLICK"
+    }
+    tokens = re.findall(r'\b([A-Za-z0-9]{5})\b', norm_txt)
+    valid_tokens = [t.upper() for t in tokens if t.upper() not in ignore_tokens]
+    if len(valid_tokens) == 1:
+        return valid_tokens[0]
+    kw_match = re.search(r'(?:код(?:ик)?|code|guard)[\s:=#\-]+([A-Za-z0-9]{5})\b', norm_txt, re.IGNORECASE)
+    if kw_match:
+        return kw_match.group(1).upper()
     return None
 def _clean_funpay_text(text: str) -> str:
     s = re.sub(r'<[^>]+>', '', text)
@@ -3977,6 +4164,8 @@ def _is_order_processed(oid: str) -> bool:
     with _processed_orders_lock:
         return oid in _processed_orders
 ORDER_PAID_RE = re.compile(r'оплатил(?:а)?\s+заказ\s*#([A-Za-z0-9]+)', re.IGNORECASE)
+_REFUND_RE = re.compile(r'(?:вернул(?:а)?\s+деньги|возврат\s+средств|отменен[оа]?|отменён[оа]?).*?#([A-Za-z0-9]+)', re.IGNORECASE)
+_CONFIRM_RE = re.compile(r'(?:подтвердил(?:а)?\s+.*?(?:заказ|завершение|выполнение).*?#([A-Za-z0-9]+)|заказ\s*#([A-Za-z0-9]+)\s*(?:подтвержден|подтверждён|закрыт|завершен|завершён))', re.IGNORECASE)
 
 _TOPUP_MARKERS = [
     "пополнение", "пополнить", "баланс", "пополнения", "по логину",
@@ -4378,11 +4567,15 @@ def _process_incoming_order(cardinal, order, event=None, order_text: str = ""):
     )
 def handle_new_order(cardinal, event, *args):
     order = getattr(event, 'order', None) or event
-    _process_incoming_order(cardinal, order, event=event)
+    oid = str(getattr(order, 'id', '') or getattr(event, 'order_id', '') or getattr(event, 'id', '') or '').strip().lstrip('#')
+    key = f"incoming:{oid}" if oid else f"incoming:event:{id(event)}"
+    serial_key = _event_chat_key(event, order)
+    if not _schedule_event_job(key, _run_serialized_event, serial_key, _process_incoming_order, cardinal, order, event):
+        _log_event("order_event_busy", level=logging.DEBUG, order_id=oid or "?")
 _recent_processed_msgs: dict[tuple[str, str], float] = {}
 _processed_msgs_lock = threading.Lock()
 
-def handle_new_message(cardinal, event, *args):
+def _handle_new_message_impl(cardinal, event, *args):
     global cardinal_instance
     if cardinal_instance is None:
         cardinal_instance = cardinal
@@ -4439,6 +4632,23 @@ def handle_new_message(cardinal, event, *args):
     author_str = str(author or '').strip().lower()
     chat_name_str = str(chat_name or '').strip().lower()
     msg_low = msg_text.lower()
+
+
+    m_ref = _REFUND_RE.search(msg_text)
+    if m_ref:
+        ref_oid = m_ref.group(1).strip()
+        logger.info(f"[{NAME}] Обнаружено сообщение о возврате средств по заказу #{ref_oid}")
+        _terminate_buyer_session(ref_oid, reason="chat_refund_notice", chat_id=chat_id)
+        return
+
+    m_conf = _CONFIRM_RE.search(msg_text)
+    if m_conf:
+        conf_oid = next((g for g in m_conf.groups() if g), "").strip()
+        if conf_oid:
+            logger.info(f"[{NAME}] Обнаружено сообщение о подтверждении/закрытии заказа #{conf_oid}")
+            _terminate_buyer_session(conf_oid, reason="chat_confirm_notice", chat_id=chat_id)
+            return
+
     is_system_msg = (
         author_str in ('funpay', 'system', 'фанпей')
         or chat_name_str in ('funpay', 'system')
@@ -4446,7 +4656,8 @@ def handle_new_message(cardinal, event, *args):
         or 'оплатил заказ #' in msg_low
         or 'оплатила заказ #' in msg_low
         or 'подтвердить выполнение заказа' in msg_low
-        or 'вернул деньги по заказу' in msg_low
+        or 'вернул деньги' in msg_low
+        or 'возврат средств' in msg_low
         or 'служба поддержки funpay' in msg_low
     )
     m = ORDER_PAID_RE.search(msg_text)
@@ -4459,16 +4670,23 @@ def handle_new_message(cardinal, event, *args):
             already = oid in _processed_orders
         if not already:
             _log_event("order_msg_fallback", order_id=oid, text=msg_text[:120])
-            full_ord = None
-            if getattr(cardinal, 'account', None):
-                try:
-                    full_ord = cardinal.account.get_order(oid)
-                except Exception as e:
-                    logger.warning(f"[{NAME}] Fallback get_order({oid}): {e}")
-            order_obj = full_ord or SimpleNamespace(id=oid, chat_id=chat_id, description=msg_text, buyer_username=chat_name or author)
-            _process_incoming_order(cardinal, order_obj, event=event, order_text=msg_text)
+            def _fallback_order_job():
+                full_ord = None
+                if getattr(cardinal, 'account', None):
+                    try:
+                        full_ord = cardinal.account.get_order(oid)
+                    except Exception as e:
+                        logger.warning(f"[{NAME}] Fallback get_order({oid}): {e}")
+                order_obj = full_ord or SimpleNamespace(id=oid, chat_id=chat_id, description=msg_text, buyer_username=chat_name or author)
+                _process_incoming_order(cardinal, order_obj, event=event, order_text=msg_text)
+            _schedule_event_job(f"incoming:{oid}", _run_serialized_event, _event_chat_key(event), _fallback_order_job)
         return
     if is_system_msg:
+        sess_chk = _find_buyer_session(chat_id=chat_id, chat_name=chat_name, author=author, author_id=author_id)
+        if sess_chk:
+            chk_oid = str(sess_chk.get("order_id", "")).strip().lstrip('#')
+            if any(w in msg_low for w in ('вернул', 'возврат', 'подтвердил', 'закрыт', 'отменен', 'отменён')):
+                _terminate_buyer_session(chk_oid, reason="chat_system_msg_closure", chat_id=chat_id)
         return
     sess = _find_buyer_session(
         chat_id=chat_id,
@@ -4478,11 +4696,16 @@ def handle_new_message(cardinal, event, *args):
     )
     if not sess:
         return
+    oid = str(sess.get("order_id", "")).strip().lstrip('#')
+    with _terminated_orders_lock:
+        if oid in _terminated_orders:
+            _terminate_buyer_session(oid, reason="terminated_order_filter", chat_id=chat_id)
+            return
+
     if chat_id is not None:
         sess["chat_id"] = chat_id
     if author_id is not None and not sess.get("buyer_id"):
         sess["buyer_id"] = author_id
-    oid = str(sess.get("order_id", ""))
     country_name = _country_display(sess.get("country", "KZ"))
     step = sess.get("step")
     raw_txt = msg_text.strip()
@@ -4545,7 +4768,7 @@ def handle_new_message(cardinal, event, *args):
                 f"• Целевой регион: <b>{country_name}</b>",
                 ntype="order"
             )
-            threading.Thread(target=_run_order_process, args=(cardinal, sess), daemon=True).start()
+            _schedule_order_worker(cardinal, sess, "login")
             return
 
         if raw_low in ("1", "1️⃣", "логин", "login", "пароль", "pass", "данные"):
@@ -4575,7 +4798,7 @@ def handle_new_message(cardinal, event, *args):
             _register_buyer_session(sess)
             _send_buyer_fp_msg(cardinal, chat_id, "🔄 Генерируем QR-код для входа...", buyer_username=sess.get("buyer_username"))
             _log_event("order_qr_started_from_menu_plus", order_id=oid)
-            threading.Thread(target=_run_qr_order_process, args=(cardinal, sess), daemon=True).start()
+            _schedule_order_worker(cardinal, sess, "qr")
             return
 
         if _is_valid_steam_login(raw_txt) and len(raw_txt) >= 3:
@@ -4613,7 +4836,7 @@ def handle_new_message(cardinal, event, *args):
                 f"• Целевой регион: <b>{country_name}</b>",
                 ntype="order"
             )
-            threading.Thread(target=_run_order_process, args=(cardinal, sess), daemon=True).start()
+            _schedule_order_worker(cardinal, sess, "login")
             return
 
         if raw_low in ("+", "++", "готов", "го", "давай", "сканирую", "2", "2️⃣", "qr", "кьюар"):
@@ -4625,7 +4848,7 @@ def handle_new_message(cardinal, event, *args):
             _register_buyer_session(sess)
             _send_buyer_fp_msg(cardinal, chat_id, "🔄 Генерируем QR-код для входа...", buyer_username=sess.get("buyer_username"))
             _log_event("order_qr_started_after_ready", order_id=oid)
-            threading.Thread(target=_run_qr_order_process, args=(cardinal, sess), daemon=True).start()
+            _schedule_order_worker(cardinal, sess, "qr")
             return
 
         if raw_low in ("1", "1️⃣", "логин", "пароль"):
@@ -4664,7 +4887,7 @@ def handle_new_message(cardinal, event, *args):
             _register_buyer_session(sess)
             _send_buyer_fp_msg(cardinal, chat_id, "🔄 Генерируем новый QR-код для входа...", buyer_username=sess.get("buyer_username"))
             _log_event("order_qr_requested_new", order_id=oid)
-            threading.Thread(target=_run_qr_order_process, args=(cardinal, sess), daemon=True).start()
+            _schedule_order_worker(cardinal, sess, "qr")
             return
 
         creds = _extract_creds_from_text(msg_text)
@@ -4690,7 +4913,7 @@ def handle_new_message(cardinal, event, *args):
                 f"• Целевой регион: <b>{country_name}</b>",
                 ntype="order"
             )
-            threading.Thread(target=_run_order_process, args=(cardinal, sess), daemon=True).start()
+            _schedule_order_worker(cardinal, sess, "login")
             return
 
         if raw_low in ("1", "1️⃣", "логин", "пароль"):
@@ -4761,7 +4984,7 @@ def handle_new_message(cardinal, event, *args):
                 f"• Целевой регион: <b>{country_name}</b>",
                 ntype="order"
             )
-            threading.Thread(target=_run_order_process, args=(cardinal, sess), daemon=True).start()
+            _schedule_order_worker(cardinal, sess, "login")
         else:
             login_val = msg_text.strip()
             if not _is_valid_steam_login(login_val):
@@ -4830,13 +5053,12 @@ def handle_new_message(cardinal, event, *args):
             f"• Целевой регион: <b>{country_name}</b>",
             ntype="order"
         )
-        threading.Thread(target=_run_order_process, args=(cardinal, sess), daemon=True).start()
+        _schedule_order_worker(cardinal, sess, "login")
     elif step == "waiting_guard":
         guard_event = sess.get("guard_event")
-        raw_val = msg_text.strip()
-        clean_code = re.sub(r'[^A-Za-z0-9]', '', raw_val).upper()
-        if len(clean_code) == 5:
-            sess["guard_code"] = clean_code
+        code = _extract_guard_code(msg_text)
+        if code:
+            sess["guard_code"] = code
             _log_event("order_guard_entered", order_id=oid, code="***")
             ack_guard = _render_buyer_msg(
                 "guard_received",
@@ -4851,13 +5073,13 @@ def handle_new_message(cardinal, event, *args):
         else:
             hint_msg = (
                 f"⚠️ Пожалуйста, введите 5-значный проверочный код Steam Guard (например: 2XY8Z).\n\n"
-                f"Вы отправили «{raw_val[:25]}», что не является 5-значным кодом. Бот продолжает ожидать корректный код Steam Guard."
+                f"Вы отправили «{msg_text.strip()[:25]}», в котором не найден 5-значный проверочный код. Бот продолжает ожидать корректный код Steam Guard."
             )
             _send_buyer_fp_msg(cardinal, chat_id, hint_msg, buyer_username=sess.get("buyer_username"))
-            _log_event("order_guard_non_code_msg", level=logging.INFO, order_id=oid, text=raw_val[:25])
+            _log_event("order_guard_non_code_msg", level=logging.INFO, order_id=oid, text=msg_text.strip()[:25])
     elif step == "paused_silent":
         txt = msg_text.strip()
-        clean_code = re.sub(r'[^A-Za-z0-9]', '', txt).upper()
+        code = _extract_guard_code(txt)
         has_new_data = False
         if ":" in txt:
             parts = txt.split(":", 1)
@@ -4865,20 +5087,27 @@ def handle_new_message(cardinal, event, *args):
             if _is_valid_steam_login(p0) and p1:
                 sess["login"], sess["password"] = p0, p1
                 has_new_data = True
-        elif len(clean_code) == 5:
-            sess["guard_code"] = clean_code
+        elif code:
+            sess["guard_code"] = code
             has_new_data = True
         if has_new_data or sess.get("guard_code"):
             sess["step"] = "processing"
             _register_buyer_session(sess)
             _send_buyer_fp_msg(cardinal, chat_id, f"✅ Данные приняты! Возобновляем выполнение заказа #{oid}...", buyer_username=sess.get("buyer_username"))
-            threading.Thread(target=_run_order_process, args=(cardinal, sess), daemon=True).start()
+            _schedule_order_worker(cardinal, sess, "login")
         else:
             hint_msg = (
                 f"⚠️ Заказ #{oid} ожидает ввода проверочного кода Steam Guard.\n\n"
                 f"Пожалуйста, отправьте 5-значный проверочный код (например: 2XY8Z) или данные в формате «логин:пароль»."
             )
             _send_buyer_fp_msg(cardinal, chat_id, hint_msg, buyer_username=sess.get("buyer_username"))
+
+def handle_new_message(cardinal, event, *args):
+    serial_key = _event_chat_key(event)
+    event_id = _message_event_identity(event)
+    job_key = f"message:{serial_key}:{event_id}"
+    if not _schedule_event_job(job_key, _run_serialized_event, serial_key, _handle_new_message_impl, cardinal, event, *args):
+        _log_event("message_event_busy", level=logging.DEBUG, chat=serial_key, event_id=event_id)
 
 def _run_qr_order_process(cardinal, sess):
     chat_id = sess["chat_id"]
@@ -4906,11 +5135,7 @@ def _run_qr_order_process(cardinal, sess):
         _send_buyer_fp_msg(cardinal, chat_id, _render_buyer_msg(msg_key, order_id=oid, country_name=country_name), buyer_username=buyer_user)
         _log_event("order_refund", level=logging.WARNING, order_id=oid, reason="no_proxies", refund_ok=refund_ok)
         sess["step"] = "failed"
-        with _sessions_lock:
-            to_del = [k for k, v in _buyer_sessions.items() if str(v.get("order_id") or "") == oid]
-            for k in to_del:
-                _buyer_sessions.pop(k, None)
-            _active_sessions[:] = [s for s in _active_sessions if str(s.get("order_id") or "") != oid]
+        _terminate_buyer_session(oid, reason="no_proxies_qr_failed", chat_id=chat_id)
         return
 
     _log_event("order_qr_start", order_id=oid, lot_id=lot_id, country=country)
@@ -5027,11 +5252,7 @@ def _run_qr_order_process(cardinal, sess):
                 f"{gift_line}",
                 ntype="success"
             )
-            with _sessions_lock:
-                to_del = [k for k, v in _buyer_sessions.items() if str(v.get("order_id") or "") == oid]
-                for k in to_del:
-                    _buyer_sessions.pop(k, None)
-                _active_sessions[:] = [s for s in _active_sessions if str(s.get("order_id") or "") != oid]
+            _terminate_buyer_session(oid, reason="order_success_qr", chat_id=chat_id)
         else:
             err_str = str(res.error or "").lower()
             if (
@@ -5145,11 +5366,7 @@ def _run_order_process(cardinal, sess):
         _send_buyer_fp_msg(cardinal, chat_id, _render_buyer_msg(msg_key, order_id=oid, country_name=_country_display(country)), buyer_username=buyer_user)
         _log_event("order_refund", level=logging.WARNING, order_id=oid, reason="no_proxies", refund_ok=refund_ok)
         sess["step"] = "failed"
-        with _sessions_lock:
-            to_del = [k for k, v in _buyer_sessions.items() if str(v.get("order_id") or "") == oid]
-            for k in to_del:
-                _buyer_sessions.pop(k, None)
-            _active_sessions[:] = [s for s in _active_sessions if str(s.get("order_id") or "") != oid]
+        _terminate_buyer_session(oid, reason="no_proxies_failed", chat_id=chat_id)
         return
     _log_event("order_start", order_id=oid, lot_id=lot_id, login=login, country=country)
     reserved_gift = None
@@ -5330,6 +5547,7 @@ def _run_order_process(cardinal, sess):
                 f"{gift_line}",
                 ntype="success"
             )
+            _terminate_buyer_session(oid, reason="login_order_success", chat_id=chat_id)
         else:
             if sess.get("is_silent_guard") and cfg.get("buyer_inactivity_reminders", True):
                 sess["step"] = "paused_silent"
@@ -5397,11 +5615,7 @@ def _run_order_process(cardinal, sess):
                 ntype="error"
             )
         if sess.get("step") not in ("paused_silent", "waiting_credentials"):
-            with _sessions_lock:
-                to_del = [k for k, v in _buyer_sessions.items() if str(v.get("order_id") or "") == oid]
-                for k in to_del:
-                    _buyer_sessions.pop(k, None)
-                _active_sessions[:] = [s for s in _active_sessions if str(s.get("order_id") or "") != oid]
+            _terminate_buyer_session(oid, reason=f"worker_cleanup_step_{sess.get('step')}", chat_id=chat_id)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -5424,11 +5638,7 @@ def _run_order_process(cardinal, sess):
             f"• Исключение: <code>{html.escape(str(e)[:250])}</code>",
             ntype="error"
         )
-        with _sessions_lock:
-            to_del = [k for k, v in _buyer_sessions.items() if str(v.get("order_id") or "") == oid]
-            for k in to_del:
-                _buyer_sessions.pop(k, None)
-            _active_sessions[:] = [s for s in _active_sessions if str(s.get("order_id") or "") != oid]
+        _terminate_buyer_session(oid, reason="worker_exception", chat_id=chat_id)
     finally:
         loop.close()
 _stop_inactivity_watcher = threading.Event()
@@ -5446,7 +5656,12 @@ def _inactivity_watcher_loop(cardinal):
                 sessions_snapshot = list(_active_sessions)
             for sess in sessions_snapshot:
                 step = sess.get("step")
-                oid = str(sess.get("order_id", ""))
+                oid = str(sess.get("order_id", "")).strip().lstrip('#')
+                with _terminated_orders_lock:
+                    if oid in _terminated_orders:
+                        continue
+                if step in ("finished", "refunded", "failed_closed"):
+                    continue
                 chat_id = sess.get("chat_id")
                 buyer_user = sess.get("buyer_username", "")
                 country_name = _country_display(sess.get("country", "KZ"))
@@ -5574,11 +5789,53 @@ def init_cardinal(cardinal, *args):
         except Exception as e:
             logger.warning(f"[{NAME}] Не удалось привязать обработчик ввода: {e}")
     logger.info(f"[{NAME}] Плагин инициализирован (v{VERSION})")
+def order_status_changed_handler(cardinal, event, *args):
+    try:
+        order = getattr(event, 'order', None)
+        order_id = (
+            getattr(order, 'id', None)
+            or getattr(order, 'order_id', None)
+            or getattr(event, 'order_id', None)
+        )
+        if not order_id:
+            return
+        oid = str(order_id).strip().lstrip('#')
+        status = (
+            getattr(order, 'status', None)
+            or getattr(event, 'status', None)
+            or getattr(event, 'new_status', None)
+        )
+        status_name = str(getattr(status, 'name', status) or '').upper()
+        if status_name in ('CLOSED', 'REFUNDED', 'PARTIALLY_REFUNDED', '1', '2', '3'):
+            chat_id = getattr(order, 'chat_id', None) or getattr(event, 'chat_id', None)
+            logger.info(f"[{NAME}] Заказ #{oid} сменил статус на {status_name} — завершаем сессию")
+            _terminate_buyer_session(oid, reason=f"OrderStatusChanged:{status_name}", chat_id=chat_id)
+    except Exception as e:
+        logger.exception(f"[{NAME}] Ошибка в order_status_changed_handler: {e}")
+
 def on_delete(cardinal, *args, **kwargs):
     _stop_inactivity_watcher.set()
+    try:
+        with _sessions_lock:
+            for sess in list(_active_sessions):
+                sess["canceled"] = True
+                ev = sess.get("cancel_qr_event")
+                if isinstance(ev, threading.Event):
+                    ev.set()
+                guard_ev = sess.get("guard_event")
+                if isinstance(guard_ev, threading.Event):
+                    guard_ev.set()
+    except Exception:
+        pass
+    for executor in (_EVENT_EXECUTOR, _ORDER_EXECUTOR):
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
     logger.info(f"[{NAME}] Плагин удален.")
 BIND_TO_PRE_INIT = [init_cardinal]
 BIND_TO_NEW_ORDER = [handle_new_order]
 BIND_TO_NEW_MESSAGE = [handle_new_message]
 BIND_TO_LAST_CHAT_MESSAGE_CHANGED = [handle_new_message]
+BIND_TO_ORDER_STATUS_CHANGED = [order_status_changed_handler]
 BIND_TO_DELETE = on_delete
