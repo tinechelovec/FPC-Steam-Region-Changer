@@ -147,7 +147,7 @@ try:
 except Exception:
     tg_types = None
 NAME = "Steam Region Changer"
-VERSION = "1.0.9"
+VERSION = "1.0.10"
 DESCRIPTION = "Смена региона Steam (Steam Region Changer)"
 CREDITS = "@tinechelovec"
 UUID = "001ab503-775a-41c2-8b96-4207daaf33a7"
@@ -3559,6 +3559,7 @@ def _open_lots_menu(chat_id, message_id=None, page: int = 0):
     )
     rows: list[list[tuple[str, str]]] = [
         [("🔄 Автодобавление (кат. 2044)", "src_lots_auto_2044"), ("➕ Добавить вручную", "src_lot_add_wizard")],
+        [("⚙️ Общая", "src_lots_bulk_menu")],
     ]
     lot_items = list(lots.values())
     total_pages = max(1, (total_lots + LOTS_PER_PAGE - 1) // LOTS_PER_PAGE) if total_lots > 0 else 1
@@ -3582,6 +3583,40 @@ def _open_lots_menu(chat_id, message_id=None, page: int = 0):
             nav.append(("След. ▶️", f"src_lots_page:{page + 1}"))
         rows.append(nav)
     rows.append([("◀️ Назад", "src_settings_panel")])
+    kb = _make_kb(rows)
+    _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
+
+def _open_lots_bulk_menu(chat_id, message_id=None):
+    _waiting.pop(chat_id, None)
+    cfg = _load_config()
+    lots = _get_lots_dict(cfg)
+    total_lots = len(lots)
+    active_lots = sum(1 for l in lots.values() if l.get("enabled", False))
+    inactive_lots = total_lots - active_lots
+
+    if total_lots == 0:
+        text = (
+            f"⚙️ <b>Общее управление лотами {NAME}</b>\n\n"
+            f"В плагине пока нет добавленных лотов."
+        )
+        rows: list[list[tuple[str, str]]] = [
+            [("◀️ Назад к лотам", "src_lots_menu")],
+        ]
+    else:
+        text = (
+            f"⚙️ <b>Общее управление лотами {NAME}</b>\n\n"
+            f"• Всего лотов в плагине: <b>{total_lots} шт.</b>\n"
+            f"• Активных: <b>🟢 {active_lots}</b> | Выключенных: <b>🔴 {inactive_lots}</b>\n\n"
+            f"Выберите необходимое действие:"
+        )
+        rows = []
+        if active_lots == 0:
+            rows.append([("🟢 Включить все лоты", "src_lots_bulk_toggle:enable")])
+        else:
+            rows.append([("🔴 Выключить все лоты", "src_lots_bulk_toggle:disable")])
+        rows.append([("🗑 Удалить все лоты", "src_lots_bulk_del_ask")])
+        rows.append([("◀️ Назад к лотам", "src_lots_menu")])
+
     kb = _make_kb(rows)
     _tg_edit(chat_id, message_id, text, kb) if message_id else _tg_send(chat_id, text, kb)
 def _open_lot_card(chat_id, lot_id: str, message_id=None):
@@ -4225,6 +4260,94 @@ def _cb_router(call):
         cfg["lots"] = {}
         _save_config(cfg)
         _open_lots_menu(chat_id, message_id)
+    elif data == "src_lots_bulk_menu":
+        _open_lots_bulk_menu(chat_id, message_id)
+    elif data.startswith("src_lots_bulk_toggle:"):
+        action = data.split(":", 1)[1]
+        enable = (action == "enable")
+        cfg = _load_config()
+        lots = _get_lots_dict(cfg)
+        for l in lots.values():
+            l["enabled"] = enable
+        cfg["lots"] = lots
+        _save_config(cfg)
+        _open_lots_bulk_menu(chat_id, message_id)
+        if cfg.get("auto_deactivate_lots", True):
+            def _sync_fp_bulk_toggle():
+                for lid in list(lots.keys()):
+                    try:
+                        _set_funpay_lot_active(cardinal_instance, lid, enable)
+                    except Exception as e:
+                        logger.warning(f"[{NAME}] Ошибка синхронизации статуса лота #{lid} на FunPay: {e}")
+            threading.Thread(target=_sync_fp_bulk_toggle, daemon=True).start()
+    elif data == "src_lots_bulk_del_ask":
+        cfg = _load_config()
+        lots = _get_lots_dict(cfg)
+        total = len(lots)
+        text = (
+            f"🗑 <b>Удаление всех лотов ({total} шт.)</b>\n\n"
+            f"⚠️ <b>Выберите вариант удаления:</b>\n\n"
+            f"1️⃣ <b>Из плагина</b> — лоты удаляются только из базы плагина. На сайте FunPay лоты останутся без изменений.\n\n"
+            f"2️⃣ <b>Из плагина и FunPay</b> — лоты будут удалены из плагина и навсегда удалены с сайта FunPay."
+        )
+        rows = [
+            [("📦 Из плагина", "src_lots_bulk_del_plugin")],
+            [("💥 Из плагина и FunPay", "src_lots_bulk_del_both_ask")],
+            [("◀️ Отмена", "src_lots_bulk_menu")],
+        ]
+        _tg_edit(chat_id, message_id, text, _make_kb(rows))
+    elif data == "src_lots_bulk_del_plugin":
+        cfg = _load_config()
+        lots = _get_lots_dict(cfg)
+        count = len(lots)
+        cfg["lots"] = {}
+        _save_config(cfg)
+        text = (
+            f"✅ <b>Все лоты удалены из плагина!</b>\n\n"
+            f"• Удалено из плагина: <b>{count} шт.</b>\n"
+            f"• Лоты на FunPay сохранены без изменений."
+        )
+        _tg_edit(chat_id, message_id, text, _make_kb([[("⭐ К списку лотов", "src_lots_menu")]]))
+    elif data == "src_lots_bulk_del_both_ask":
+        cfg = _load_config()
+        lots = _get_lots_dict(cfg)
+        total = len(lots)
+        text = (
+            f"⚠️ <b>Подтверждение полного удаления</b>\n\n"
+            f"Вы уверены, что хотите удалить <b>{total} шт.</b> лотов из плагина <b>и навсегда с сайта FunPay</b>?\n\n"
+            f"❗️ <i>Восстановить удалённые с FunPay лоты будет невозможно!</i>"
+        )
+        rows = [
+            [("💥 Да, удалить отовсюду", "src_lots_bulk_del_both_yes")],
+            [("◀️ Отмена", "src_lots_bulk_del_ask")],
+        ]
+        _tg_edit(chat_id, message_id, text, _make_kb(rows))
+    elif data == "src_lots_bulk_del_both_yes":
+        cfg = _load_config()
+        lots = _get_lots_dict(cfg)
+        total = len(lots)
+        _tg_edit(chat_id, message_id, "⏳ <b>Удаление лотов с FunPay и из плагина... Пожалуйста, подождите.</b>")
+        def _delete_both_worker():
+            fp_deleted = 0
+            fp_failed = 0
+            for lid in list(lots.keys()):
+                ok = _delete_funpay_lot(cardinal_instance, lid)
+                if ok:
+                    fp_deleted += 1
+                else:
+                    fp_failed += 1
+            curr_cfg = _load_config()
+            curr_cfg["lots"] = {}
+            _save_config(curr_cfg)
+            msg = (
+                f"✅ <b>Удаление завершено!</b>\n\n"
+                f"• Удалено из базы плагина: <b>{total} шт.</b>\n"
+                f"• Удалено с сайта FunPay: <b>{fp_deleted} шт.</b>\n"
+            )
+            if fp_failed > 0:
+                msg += f"• Ошибок при удалении с FunPay: <b>{fp_failed} шт.</b>\n"
+            _tg_edit(chat_id, message_id, msg, _make_kb([[("⭐ К списку лотов", "src_lots_menu")]]))
+        threading.Thread(target=_delete_both_worker, daemon=True).start()
     elif data.startswith("src_lot_card:"):
         lid = data.split(":", 1)[1]
         _open_lot_card(chat_id, lid, message_id)
@@ -4882,6 +5005,28 @@ def _set_funpay_lot_active(cardinal, lot_id: str | int, active: bool) -> bool:
         return False
 def _deactivate_funpay_lot(cardinal, lot_id: str | int) -> bool:
     return _set_funpay_lot_active(cardinal, lot_id, False)
+
+def _delete_funpay_lot(cardinal, lot_id: str | int) -> bool:
+    acc = getattr(cardinal, 'account', None) if cardinal else None
+    if not acc:
+        acc = getattr(cardinal_instance, 'account', None) if cardinal_instance else None
+    if not acc:
+        return False
+    try:
+        lid_int = int(str(lot_id).strip().lstrip('#'))
+        if hasattr(acc, "delete_lot"):
+            acc.delete_lot(lid_int)
+        else:
+            try:
+                from FunPayAPI.types import LotFields
+                acc.save_lot(LotFields(lid_int, {"csrf_token": getattr(acc, "csrf_token", ""), "offer_id": lid_int, "deleted": "1"}))
+            except Exception:
+                acc.method("post", "https://funpay.com/lots/offerEdit", {"csrf_token": getattr(acc, "csrf_token", ""), "offer_id": lid_int, "deleted": "1"})
+        logger.info(f"[{NAME}] Лот #{lot_id} удалён с FunPay")
+        return True
+    except Exception as e:
+        logger.warning(f"[{NAME}] Ошибка удаления лота #{lot_id} с FunPay: {e}")
+        return False
 PROCESSED_ORDERS_FILE = os.path.join(STORAGE_DIR, "processed_orders.json")
 _processed_orders_list: list[str] = []
 _processed_orders: set[str] = set()
