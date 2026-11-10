@@ -147,7 +147,7 @@ try:
 except Exception:
     tg_types = None
 NAME = "Steam Region Changer"
-VERSION = "1.0.10"
+VERSION = "1.0.11"
 DESCRIPTION = "Смена региона Steam (Steam Region Changer)"
 CREDITS = "@tinechelovec"
 UUID = "001ab503-775a-41c2-8b96-4207daaf33a7"
@@ -306,18 +306,20 @@ def _schedule_limited_job(executor, registry: dict[str, Any], registry_lock: thr
         except RuntimeError:
             return False
         registry[key] = fut
-        def _cleanup(done_fut):
-            with registry_lock:
-                if registry.get(key) is done_fut:
-                    registry.pop(key, None)
-            try:
-                exc = done_fut.exception()
-                if exc is not None:
-                    logger.error(f"{LP} background job failed key={key}: {exc}", exc_info=(type(exc), exc, exc.__traceback__))
-            except Exception:
-                pass
-        fut.add_done_callback(_cleanup)
-        return True
+
+    def _cleanup(done_fut):
+        with registry_lock:
+            if registry.get(key) is done_fut:
+                registry.pop(key, None)
+        try:
+            exc = done_fut.exception()
+            if exc is not None:
+                logger.error(f"{LP} background job failed key={key}: {exc}", exc_info=(type(exc), exc, exc.__traceback__))
+        except Exception:
+            pass
+
+    fut.add_done_callback(_cleanup)
+    return True
 
 def _schedule_event_job(key: str, fn, *args, **kwargs) -> bool:
     return _schedule_limited_job(_EVENT_EXECUTOR, _EVENT_JOBS, _EVENT_JOBS_LOCK, key, fn, *args, **kwargs)
@@ -961,8 +963,40 @@ async def _try_import_manual_steam():
                             await self._guard_provider(self._login, guard_type="push", guard_detail="Steam Mobile App")
                         except Exception:
                             pass
+                    device_code_type = getattr(EAuthSessionGuardType, 'k_EAuthSessionGuardType_DeviceCode', 3)
                     for _poll_i in range(30):
                         await asyncio.sleep(poll_interval)
+                        if self._guard_provider is not None and device_conf is not None:
+                            try:
+                                push_code = (await self._guard_provider(
+                                    self._login,
+                                    guard_type="push_code",
+                                    guard_detail="Steam Mobile App",
+                                ) or "").strip().upper()
+                            except Exception:
+                                push_code = ""
+                            if push_code:
+                                logger.info(f"[{self._login}] Получен 5-значный код Steam Guard во время Mobile Push, отправляем в Steam...")
+                                try:
+                                    await self._update_auth_session(
+                                        client_id=auth_session.client_id,
+                                        steamid=auth_session.steamid,
+                                        code=push_code,
+                                        code_type=device_code_type,
+                                    )
+                                except Exception as _code_err:
+                                    err_code = getattr(_code_err, "error_code", None)
+                                    err_msg = str(getattr(_code_err, "error_msg", "") or str(_code_err))
+                                    logger.warning(f"[{self._login}] Код Steam Guard из Mobile Push отклонён: {err_code} {err_msg}")
+                                    if err_code in (65, 88) or "twofactorcodemismatch" in err_msg.lower() or "invalidloginauthcode" in err_msg.lower():
+                                        try:
+                                            await self._guard_provider(
+                                                self._login,
+                                                guard_type="push_code_invalid",
+                                                guard_detail="Steam Mobile App",
+                                            )
+                                        except Exception:
+                                            pass
                         try:
                             session = await self._poll_auth_session_status(
                                 client_id=auth_session.client_id,
@@ -2603,9 +2637,12 @@ DEFAULT_BUYER_MESSAGES: dict[str, str] = {
         "Пожалуйста, отправьте новый 5-значный проверочный код сообщением в этот чат:"
     ),
     "guard_push": (
-        "📱 Требуется подтверждение входа!\n\n"
-        "Пожалуйста, откройте мобильное приложение Steam на телефоне и подтвердите попытку входа (нажмите «Подтвердить» в уведомлении Steam Guard).\n\n"
-        "⏳ Бот ожидает подтверждения входа..."
+        "📱 Требуется подтверждение входа в Steam!\n\n"
+        "1️⃣ Зайдите в мобильное приложение Steam и откройте раздел «Steam Guard».\n"
+        "2️⃣ Вам будет предложен выбор для подтверждения входа:\n"
+        "• Сначала выберите: «Браузер»\n"
+        "• Затем выберите гео-метку со страной: {country_name}\n\n"
+        "💬 Либо вы можете просто отправить 5-значный проверочный код Steam Guard из мобильного приложения в этот чат!"
     ),
     "guard_received": (
         "✅ Код Steam Guard принят!\n\n"
@@ -2672,9 +2709,8 @@ DEFAULT_BUYER_MESSAGES: dict[str, str] = {
     ),
     "reminder_login": (
         "👋 Здравствуйте, {buyer_username}!\n\n"
-        "Напоминаем: для выполнения заказа #{order_id} по смене региона Steam на {country_name}, пожалуйста, выберите способ авторизации:\n"
-        "1 — по логину и паролю\n"
-        "2 — по QR-коду (или напишите «+» когда будете готовы)"
+        "Напоминаем: для выполнения заказа #{order_id} по смене региона Steam на {country_name} отправьте логин и пароль от аккаунта Steam в этот чат.\n\n"
+        "💬 Можно отправить сразу в формате: логин:пароль"
     ),
     "reminder_password": (
         "🔑 Напоминание по заказу #{order_id}!\n\n"
@@ -2696,6 +2732,20 @@ DEFAULT_BUYER_MESSAGES: dict[str, str] = {
     "welcome_qr_only": (
         "Вы выбрали авторизацию по QR-коду. 📷\n\n"
         "⚠️ Напишите + в чат, когда будете готовы открыть мобильное приложение Steam (Steam Guard → Сканер) и отсканировать код."
+    ),
+}
+
+_LEGACY_BUYER_MESSAGE_DEFAULTS: dict[str, str] = {
+    "guard_push": (
+        "📱 Требуется подтверждение входа!\n\n"
+        "Пожалуйста, откройте мобильное приложение Steam на телефоне и подтвердите попытку входа (нажмите «Подтвердить» в уведомлении Steam Guard).\n\n"
+        "⏳ Бот ожидает подтверждения входа..."
+    ),
+    "reminder_login": (
+        "👋 Здравствуйте, {buyer_username}!\n\n"
+        "Напоминаем: для выполнения заказа #{order_id} по смене региона Steam на {country_name}, пожалуйста, выберите способ авторизации:\n"
+        "1 — по логину и паролю\n"
+        "2 — по QR-коду (или напишите «+» когда будете готовы)"
     ),
 }
 
@@ -2745,7 +2795,7 @@ BUYER_MESSAGE_HINTS: dict[str, str] = {
     "data_received": "Переменные: <code>{login}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
     "guard_request": "Переменные: <code>{login}</code>, <code>{order_id}</code>, <code>{guard_destination}</code>",
     "guard_retry": "Переменные: <code>{login}</code>, <code>{order_id}</code>, <code>{guard_destination}</code>",
-    "guard_push": "Переменные: <code>{login}</code>, <code>{order_id}</code>",
+    "guard_push": "Переменные: <code>{login}</code>, <code>{order_id}</code>, <code>{country_name}</code>",
     "guard_received": "Переменные: <code>{country_name}</code>, <code>{login}</code>, <code>{order_id}</code>",
     "success": "Переменные: <code>{country_name}</code>, <code>{login}</code>, <code>{order_id}</code>",
     "reminder_login": "Переменные: <code>{buyer_username}</code>, <code>{country_name}</code>, <code>{order_id}</code>",
@@ -2766,9 +2816,12 @@ def _get_buyer_messages() -> dict[str, str]:
     if isinstance(saved, dict):
         for k, v in saved.items():
             if k in DEFAULT_BUYER_MESSAGES and v:
-                if "{guard_destination}" in DEFAULT_BUYER_MESSAGES[k] and "{guard_destination}" not in str(v):
+                saved_value = str(v)
+                if saved_value == _LEGACY_BUYER_MESSAGE_DEFAULTS.get(k):
                     continue
-                merged[k] = str(v)
+                if "{guard_destination}" in DEFAULT_BUYER_MESSAGES[k] and "{guard_destination}" not in saved_value:
+                    continue
+                merged[k] = saved_value
     return merged
 def _render_buyer_msg(key: str, **kwargs) -> str:
     msgs = _get_buyer_messages()
@@ -4839,7 +4892,7 @@ def _find_buyer_session(
             return matching[0]
         input_waiting = [s for s in matching if s.get("step") in (
             "waiting_choice", "waiting_qr_ready", "waiting_qr", "waiting_qr_timeout",
-            "waiting_qr_or_creds", "waiting_guard", "waiting_password", "waiting_login", "waiting_credentials"
+            "waiting_qr_or_creds", "waiting_guard", "waiting_push", "waiting_password", "waiting_login", "waiting_credentials"
         )]
         if input_waiting:
             return input_waiting[0]
@@ -5960,6 +6013,27 @@ def _handle_new_message_impl(cardinal, event, *args):
             ntype="order"
         )
         _schedule_order_worker(cardinal, sess, "login")
+    elif step == "waiting_push":
+        code = _extract_guard_code(msg_text)
+        if code:
+            sess["guard_code"] = code
+            _register_buyer_session(sess)
+            _send_buyer_fp_msg(
+                cardinal,
+                chat_id,
+                "✅ Код Steam Guard получен! Проверяем его...",
+                buyer_username=sess.get("buyer_username"),
+            )
+            _log_event("order_guard_push_code_entered", order_id=oid, code="***")
+        else:
+            push_hint = _render_buyer_msg(
+                "guard_push",
+                login=sess.get("login", ""),
+                order_id=oid,
+                buyer_username=sess.get("buyer_username", ""),
+                country_name=country_name,
+            )
+            _send_buyer_fp_msg(cardinal, chat_id, push_hint, buyer_username=sess.get("buyer_username"))
     elif step == "waiting_guard":
         guard_event = sess.get("guard_event")
         code = _extract_guard_code(msg_text)
@@ -6528,8 +6602,26 @@ def _run_order_process(cardinal, sess):
         guard_call_count = 0
         async def _guard_cb(login_str: str, guard_type: str = "guard", guard_detail: str = "", is_retry: bool = False) -> str:
             nonlocal guard_call_count
+            if guard_type == "push_code":
+                return str(sess.pop("guard_code", "") or "").strip().upper()
+            if guard_type == "push_code_invalid":
+                sess.pop("guard_code", None)
+                sess["step"] = "waiting_push"
+                _register_buyer_session(sess)
+                retry_msg = _render_buyer_msg(
+                    "guard_retry",
+                    login=login,
+                    order_id=oid,
+                    buyer_username=buyer_user,
+                    guard_destination="📱 Откройте раздел Steam Guard в мобильном приложении и возьмите новый 5-значный код.",
+                    country_name=_country_display(country),
+                )
+                _send_buyer_fp_msg(cardinal, chat_id, retry_msg, buyer_username=buyer_user)
+                _log_event("order_guard_push_code_rejected", order_id=oid, login=login)
+                return ""
             guard_call_count += 1
             if guard_type == "push":
+                sess.pop("guard_code", None)
                 sess["step"] = "waiting_push"
                 _register_buyer_session(sess)
                 push_msg = _render_buyer_msg(
