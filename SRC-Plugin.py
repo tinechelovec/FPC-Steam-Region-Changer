@@ -147,7 +147,7 @@ try:
 except Exception:
     tg_types = None
 NAME = "Steam Region Changer"
-VERSION = "1.0.11"
+VERSION = "1.0.12"
 DESCRIPTION = "Смена региона Steam (Steam Region Changer)"
 CREDITS = "@tinechelovec"
 UUID = "001ab503-775a-41c2-8b96-4207daaf33a7"
@@ -822,6 +822,38 @@ class GuardCodeRejected(Exception):
     pass
 class SteamLoginFailed(Exception):
     pass
+
+async def _ensure_session_cookie(request_strategy: ProxyRequestStrategy, domain: str = "steamcommunity.com") -> str:
+    cookie = str(request_strategy.cookies(domain).get("sessionid") or "").strip()
+    if cookie:
+        return cookie
+    paths = (
+        ("https://steamcommunity.com/login/home/?goto=", "https://steamcommunity.com/")
+        if domain == "steamcommunity.com"
+        else (f"https://{domain}/",)
+    )
+    for url in paths:
+        try:
+            resp = await request_strategy.request(url, method="GET", allow_redirects=False)
+            try:
+                await resp.read()
+            finally:
+                resp.release()
+        except Exception as exc:
+            _log_event("sessionid_probe_failed", level=logging.DEBUG, domain=domain, error=type(exc).__name__)
+        cookie = str(request_strategy.cookies(domain).get("sessionid") or "").strip()
+        if cookie:
+            _log_event("sessionid_ready", level=logging.DEBUG, domain=domain, source="steam")
+            return cookie
+    from yarl import URL
+    cookie = secrets.token_hex(12)
+    request_strategy._get_session().cookie_jar.update_cookies(
+        {"sessionid": cookie}, response_url=URL(f"https://{domain}/")
+    )
+    if request_strategy.cookies(domain).get("sessionid") != cookie:
+        raise SteamLoginFailed(f"Не удалось сохранить Steam sessionid для {domain}")
+    _log_event("sessionid_ready", level=logging.INFO, domain=domain, source="client")
+    return cookie
 _ManualSteamClass = None
 
 async def _try_import_manual_steam():
@@ -895,11 +927,7 @@ async def _try_import_manual_steam():
         async def login_to_steam(self) -> None:
             if await self.is_authorized():
                 return
-            if not self._requests.cookies().get("sessionid"):
-                try:
-                    await self._requests.bytes(method="GET", url="https://steamcommunity.com/login/home/?goto=")
-                except Exception:
-                    await self._requests.bytes(method="GET", url="https://steamcommunity.com")
+            await _ensure_session_cookie(self._requests)
 
             session = None
             auth_session = None
@@ -1158,7 +1186,7 @@ async def _try_import_manual_steam():
 
             tokens = await self._finalize_login(
                 refresh_token=session.refresh_token,
-                sessionid=self._requests.cookies()["sessionid"],
+                sessionid=await _ensure_session_cookie(self._requests),
             )
             for token in tokens.transfer_info:
                 await self._set_token(
@@ -1172,7 +1200,10 @@ async def _try_import_manual_steam():
             cookies = {"steamcommunity.com": self._requests.cookies("steamcommunity.com")}
             for url in ("https://store.steampowered.com", "https://help.steampowered.com"):
                 await self._requests.bytes(url, "GET")
-                cookies.update({parse_url(url).host: self._requests.cookies(parse_url(url).host)})
+                host = parse_url(url).host
+                if host == "store.steampowered.com":
+                    await _ensure_session_cookie(self._requests, host)
+                cookies.update({host: self._requests.cookies(host)})
             await self._storage.set(login=self._login, cookies=cookies)
     _ManualSteamClass = ManualGuardSteam
     return _ManualSteamClass
@@ -1225,8 +1256,7 @@ async def _try_import_qr_steam():
             if cancel_event and cancel_event.is_set():
                 _log_event("qr_worker_cancelled", order_id=oid_log, reason="cancelled_pre_login")
                 raise QRLoginCancelled("QR-авторизация отменена")
-            if not self._requests.cookies().get("sessionid"):
-                await self._requests.bytes(method="GET", url="https://steamcommunity.com")
+            await _ensure_session_cookie(self._requests)
             if cancel_event and cancel_event.is_set():
                 _log_event("qr_worker_cancelled", order_id=oid_log, reason="cancelled_post_cookie")
                 raise QRLoginCancelled("QR-авторизация отменена")
@@ -1296,7 +1326,7 @@ async def _try_import_qr_steam():
                 raise QRLoginTimeout("QR-код не подтверждён (истекло время ожидания)")
             tokens = await self._finalize_login(
                 refresh_token=refresh_token,
-                sessionid=self._requests.cookies()["sessionid"],
+                sessionid=await _ensure_session_cookie(self._requests),
             )
             steamid = int(tokens.steamID) if tokens.steamID else 0
             for token in tokens.transfer_info:
@@ -1311,7 +1341,10 @@ async def _try_import_qr_steam():
             cookies = {"steamcommunity.com": self._requests.cookies("steamcommunity.com")}
             for url in ("https://store.steampowered.com", "https://help.steampowered.com"):
                 await self._requests.bytes(url, "GET")
-                cookies.update({parse_url(url).host: self._requests.cookies(parse_url(url).host)})
+                host = parse_url(url).host
+                if host == "store.steampowered.com":
+                    await _ensure_session_cookie(self._requests, host)
+                cookies.update({host: self._requests.cookies(host)})
             await self._storage.set(login=self._login, cookies=cookies)
             return self.account_name
     _QRSteamClass = QRSteam
